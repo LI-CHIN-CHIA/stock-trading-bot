@@ -56,8 +56,8 @@ NORMAL = RiskProfile(
 
 # 興櫃高風險
 EMERGING = RiskProfile(
-    stop_loss_pct    = 0.05,   # 更緊停損 -5%
-    take_profit_pct  = 0.08,   # 停利 +8%（不等 AI 確認，直接出場）
+    stop_loss_pct    = 0.05,   # 更緊停損 -5%（ATR追蹤為主，此為無ATR時備用）
+    take_profit_pct  = 0.15,   # 停利 +15%（給題材行情更多空間，R/R=3x）
     atr_multiplier   = 1.5,    # ATR 追蹤更緊
     max_hold_days    = 5,      # 最多持有 5 個交易日
     max_per_stock_pct= 0.20,   # 最多佔總資金 20%

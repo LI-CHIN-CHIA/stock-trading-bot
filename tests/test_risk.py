@@ -29,7 +29,7 @@ class TestRiskProfiles:
 
     def test_emerging_params(self):
         assert EMERGING.stop_loss_pct == 0.05
-        assert EMERGING.take_profit_pct == 0.08
+        assert EMERGING.take_profit_pct == 0.15
         assert EMERGING.atr_multiplier == 1.5
         assert EMERGING.max_hold_days == 5
         assert EMERGING.max_per_stock_pct == 0.20
@@ -37,12 +37,18 @@ class TestRiskProfiles:
         assert EMERGING.require_ta
         assert EMERGING.is_emerging
 
-    def test_emerging_stricter_than_normal(self):
+    def test_emerging_risk_parameters(self):
+        # 停損更緊（更快截損）
         assert EMERGING.stop_loss_pct < NORMAL.stop_loss_pct
-        assert EMERGING.take_profit_pct < NORMAL.take_profit_pct
+        # 停利更高（給題材行情更多空間，R/R = 15/5 = 3x）
+        assert EMERGING.take_profit_pct > NORMAL.take_profit_pct
+        # ATR 追蹤更緊
         assert EMERGING.atr_multiplier < NORMAL.atr_multiplier
+        # 持有天數更短
         assert EMERGING.max_hold_days < NORMAL.max_hold_days
+        # 單支上限更低
         assert EMERGING.max_per_stock_pct < NORMAL.max_per_stock_pct
+        # 買入門檻更高
         assert EMERGING.min_buy_proba > NORMAL.min_buy_proba
 
     def test_get_risk_profile_normal(self):
@@ -128,12 +134,12 @@ class TestTakeProfit:
     def test_normal_triggered(self):
         assert should_take_profit(100, 111, NORMAL)      # +11%
 
-    def test_emerging_lower_threshold(self):
-        assert should_take_profit(100, 109, EMERGING)    # +9% >= 8% 觸發
-        assert not should_take_profit(100, 107, EMERGING)  # +7% 不觸發
+    def test_emerging_threshold(self):
+        assert should_take_profit(100, 116, EMERGING)     # +16% >= 15% 觸發
+        assert not should_take_profit(100, 114, EMERGING) # +14% 不觸發
 
     def test_at_threshold(self):
-        assert should_take_profit(100, 108.0, EMERGING)  # 精確 +8%
+        assert should_take_profit(100, 115.0, EMERGING)  # 精確 +15%
 
 
 # ── 倉位大小 ──────────────────────────────────────────────────────────────────
