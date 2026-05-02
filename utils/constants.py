@@ -104,6 +104,26 @@ OTC_SYMBOLS = {
     "4961", "3653", "6415", "8299",
 }
 
+# ── 興櫃 (Emerging Stock Board) ────────────────────────────────────────────────
+# 高風險，套用 EMERGING 風險設定檔：停損-5%、最多1支、必須TA確認、持倉5天
+# yfinance 後綴：大多數用 .TW 或 .TWO，少數無資料（則 AI 訊號降權）
+# 請依實際交易需求增減清單
+EMERGING_SYMBOLS: dict[str, str] = {
+    # code: "中文名 English"
+    # 範例（請換成你實際想交易的興櫃股）:
+    # "6589": "台康生技 TaiGen Biotech",
+    # "6803": "崑鼎 Kanding",
+    # "4104": "佳醫 Jiamed",
+    # "7762": "新鉅科 NewGiga",
+    # "4744": "皇將 HuangJiang",
+}
+
+# 興櫃也加入 STOCK_DB（若有的話）
+STOCK_DB.update(EMERGING_SYMBOLS)
+
+# 興櫃可交易集合
+EMERGING_TRADEABLE: set[str] = set(EMERGING_SYMBOLS.keys())
+
 # Period options for UI: label -> yfinance period string
 PERIOD_OPTIONS = {
     "當天": "1d",

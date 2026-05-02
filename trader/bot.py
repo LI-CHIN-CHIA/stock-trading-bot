@@ -20,6 +20,7 @@ from trader.risk import (
     MIN_BUY_PROBA,
     buy_cost,
     can_open_position,
+    get_risk_profile,
     pnl,
     position_size,
     sell_proceeds,
@@ -27,7 +28,7 @@ from trader.risk import (
     should_stop_loss,
     should_take_profit,
 )
-from utils.constants import OTC_SYMBOLS, STOCK_DB, TRADEABLE
+from utils.constants import EMERGING_SYMBOLS, EMERGING_TRADEABLE, OTC_SYMBOLS, STOCK_DB, TRADEABLE
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -388,10 +389,13 @@ class TradingBot:
             if price <= 0:
                 continue
 
+            profile = get_risk_profile(code)
+
             # Update trailing peak price (never moves down)
             h["peak_price"] = max(h.get("peak_price", h["entry_price"]), price)
 
             abs_pnl, pct_pnl = pnl(h["entry_price"], price, h["shares"])
+            hold_days = h.get("hold_days", 0)
             reason = None
             sell_proba = 0.0
 
@@ -400,30 +404,40 @@ class TradingBot:
             atr = signal.get("atr", 0.0) if signal else h.get("atr", 0.0)
 
             # ── 1. ATR trailing stop (primary stop mechanism) ─────────────────
-            if should_atr_stop(h["peak_price"], price, atr):
-                reason = f"ATR追蹤停損 {pct_pnl:.1%} (peak={h['peak_price']:.2f}, atr={atr:.2f})"
+            if should_atr_stop(h["peak_price"], price, atr, profile):
+                reason = (f"ATR追蹤停損[{profile.label}] {pct_pnl:.1%} "
+                          f"(peak={h['peak_price']:.2f}, atr={atr:.2f}, x{profile.atr_multiplier})")
                 sell_proba = 0.95
             # ── 2. Fixed stop-loss fallback (when ATR unavailable) ────────────
-            elif atr <= 0 and should_stop_loss(h["entry_price"], price):
-                reason = f"停損 {pct_pnl:.1%}"
+            elif atr <= 0 and should_stop_loss(h["entry_price"], price, profile):
+                reason = f"停損[{profile.label}] {pct_pnl:.1%} (門檻{profile.stop_loss_pct:.0%})"
                 sell_proba = 0.95
-            # ── 3. Strategy B: AI confirms take-profit ────────────────────────
-            elif should_take_profit(h["entry_price"], price):
-                buy_proba = signal.get("buy_proba", 0) if signal else 0
-                if signal and signal.get("signal") == "BUY" and buy_proba >= 0.70:
-                    logger.info(
-                        f"📈 {code} 達停利 {pct_pnl:.1%} 但 AI 仍看多 ({buy_proba:.0%})，繼續持有"
-                    )
+            # ── 3. Take-profit（興櫃：直接出場；一般：Strategy B AI 確認）────
+            elif should_take_profit(h["entry_price"], price, profile):
+                if not profile.is_emerging:
+                    buy_proba = signal.get("buy_proba", 0) if signal else 0
+                    if signal and signal.get("signal") == "BUY" and buy_proba >= 0.70:
+                        logger.info(
+                            f"📈 {code} 達停利 {pct_pnl:.1%} 但 AI 仍看多 ({buy_proba:.0%})，繼續持有"
+                        )
+                    else:
+                        reason = f"停利 {pct_pnl:.1%}"
+                        sell_proba = 0.80
                 else:
-                    reason = f"停利 {pct_pnl:.1%}"
-                    sell_proba = 0.80
-            # ── 4. LightGBM sell signal ───────────────────────────────────────
+                    # 興櫃：到達停利直接出場，不等 AI 確認
+                    reason = f"停利[興櫃] {pct_pnl:.1%} (門檻{profile.take_profit_pct:.0%})"
+                    sell_proba = 0.90
+            # ── 4. 最大持有天數 ───────────────────────────────────────────────
+            elif hold_days >= profile.max_hold_days:
+                reason = f"超過持有期[{profile.label}] {hold_days}天 ({pct_pnl:.1%})"
+                sell_proba = 0.80
+            # ── 5. LightGBM sell signal ───────────────────────────────────────
             elif signal and signal.get("signal") == "SELL" and signal.get("sell_proba", 0) >= 0.55:
                 sell_proba = signal["sell_proba"]
                 reason = f"AI賣出 {sell_proba:.0%}"
-            # ── 5. TradingAgents 主動詢問（每次監控都問，不受門檻限制）───────
+            # ── 6. TradingAgents 主動詢問（每次監控都問，不受門檻限制）───────
             else:
-                ta_opinion = self._get_ta_holding_opinion(code, h, price, pct_pnl)
+                ta_opinion = self._get_ta_holding_opinion(code, h, price, pct_pnl, profile)
                 if ta_opinion:
                     reason, sell_proba = ta_opinion
 
@@ -447,36 +461,41 @@ class TradingBot:
                     logger.warning(f"⚠️  {code} 賣出未成交，繼續持有")
 
     def _get_ta_holding_opinion(
-        self, code: str, h: dict, price: float, pct_pnl: float
+        self, code: str, h: dict, price: float, pct_pnl: float, profile=None
     ) -> tuple[str, float] | None:
         """
         每次監控都詢問 TradingAgents 對持倉股票的看法。
         不受停損/停利門檻限制，只要 TA 明確建議賣就執行。
+        興櫃股票使用更低的信心門檻（0.50）和更短的 TTL（30分鐘）。
 
         回傳 (reason, sell_proba) 或 None（不賣）。
         """
         from trader.ta_signal import ENABLE_TA, get_ta_signal
         if not ENABLE_TA:
             return None
+        if profile is None:
+            profile = get_risk_profile(code)
+        # 興櫃信心門檻較低（0.50）；一般股票 0.60
+        sell_confidence_threshold = 0.50 if profile.is_emerging else 0.60
         try:
             today = datetime.now().strftime("%Y-%m-%d")
-            ta = get_ta_signal(code, today, mode="holding")
+            ta = get_ta_signal(code, today, mode="holding",
+                               ttl_override=profile.ta_ttl_min)
             if ta is None:
                 return None
 
             ta_sig  = ta.get("signal", "HOLD")
             ta_conf = ta.get("confidence", 0.0)
 
-            # TA 明確建議賣（信心 >= 0.60）→ 執行賣出
-            if ta_sig == "SELL" and ta_conf >= 0.60:
-                reason = f"TradingAgents建議賣出 (信心{ta_conf:.0%}, 損益{pct_pnl:+.1%})"
+            if ta_sig == "SELL" and ta_conf >= sell_confidence_threshold:
+                label = f"[{profile.label}]" if profile.is_emerging else ""
+                reason = f"TradingAgents建議賣出{label} (信心{ta_conf:.0%}, 損益{pct_pnl:+.1%})"
                 logger.info(f"🤖 TA {code}: SELL 信心={ta_conf:.0%} → 賣出")
                 return reason, ta_conf
 
-            # TA 建議繼續持有或買入 → 記錄 log 但不動作
             hold_days = h.get("hold_days", 0)
             logger.info(
-                f"🤖 TA {code}: {ta_sig} 信心={ta_conf:.0%} | "
+                f"🤖 TA {code}[{profile.label}]: {ta_sig} 信心={ta_conf:.0%} | "
                 f"持有{hold_days}天 損益{pct_pnl:+.1%} → 繼續持有"
             )
             return None
@@ -488,30 +507,58 @@ class TradingBot:
         if not can_open_position(self.holdings, self.cash, 1):
             return
 
-        candidates = []
-        for code in TRADEABLE:
-            if code in self.holdings:
-                continue
-            signal = self._get_ai_signal(code)
-            if signal and signal.get("signal") == "BUY" and signal.get("buy_proba", 0) >= MIN_BUY_PROBA:
-                price = self._get_latest_price(code)
-                if price > 0:
-                    candidates.append((code, signal["buy_proba"], price, signal.get("atr", 0.0)))
-
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        slots = MAX_POSITIONS - len(self.holdings)
-
-        # 總資產 = 現金 + 持倉市值（用於計算每筆上限）
+        # 總資產（用於計算每筆上限）
         holding_value = sum(
             h["shares"] * self._get_latest_price(c)
             for c, h in self.holdings.items()
         )
         total_capital = self.cash + holding_value
 
-        for code, buy_proba, price, atr in candidates[:slots]:
-            if not can_open_position(self.holdings, self.cash, 1):
-                break
-            shares = position_size(self.cash, price, slots, total_capital)
+        # 興櫃：13:00 後不新開倉（流動性差，來不及成交）
+        import pytz as _pytz
+        now_tw = datetime.now(_pytz.timezone("Asia/Taipei"))
+        allow_emerging = now_tw.hour < 13
+
+        # ── 一般股票候選 ───────────────────────────────────────────────────────
+        candidates = []
+        for code in TRADEABLE:
+            if code in self.holdings or code in EMERGING_TRADEABLE:
+                continue
+            profile = get_risk_profile(code)
+            signal = self._get_ai_signal(code)
+            if signal and signal.get("signal") == "BUY" and signal.get("buy_proba", 0) >= profile.min_buy_proba:
+                price = self._get_latest_price(code)
+                if price > 0:
+                    candidates.append((code, signal["buy_proba"], price, signal.get("atr", 0.0), profile))
+
+        # ── 興櫃候選（需 TA 確認 + 時間限制 + 現有興櫃持倉 < 1）────────────
+        if allow_emerging and EMERGING_TRADEABLE:
+            current_emerging = sum(1 for c in self.holdings if c in EMERGING_TRADEABLE)
+            if current_emerging < 1:
+                for code in EMERGING_TRADEABLE:
+                    if code in self.holdings:
+                        continue
+                    profile = get_risk_profile(code)  # always EMERGING
+                    signal = self._get_ai_signal(code)
+                    if not (signal and signal.get("signal") == "BUY"
+                            and signal.get("buy_proba", 0) >= profile.min_buy_proba):
+                        continue
+                    # 興櫃：額外要求 TradingAgents 確認
+                    ta_ok = self._ta_confirm_buy(code)
+                    if not ta_ok:
+                        logger.info(f"⚠️  興櫃 {code} LightGBM BUY 但 TradingAgents 未確認，跳過")
+                        continue
+                    price = self._get_latest_price(code)
+                    if price > 0:
+                        candidates.append((code, signal["buy_proba"], price, signal.get("atr", 0.0), profile))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        slots = MAX_POSITIONS - len(self.holdings)
+
+        for code, buy_proba, price, atr, profile in candidates[:slots]:
+            if not can_open_position(self.holdings, self.cash, price, profile):
+                continue
+            shares = position_size(self.cash, price, slots, total_capital, profile)
             if shares < 1:
                 continue
             cost = buy_cost(shares, price)
@@ -530,6 +577,7 @@ class TradingBot:
                     "buy_proba": buy_proba,
                     "atr": atr,
                     "peak_price": price,
+                    "hold_days": 0,
                 }
                 self.trade_log.append({
                     "date": datetime.now().strftime("%Y-%m-%d"),
@@ -538,8 +586,34 @@ class TradingBot:
                     "shares": filled_shares,
                     "price": price,
                     "buy_proba": buy_proba,
+                    "market": "emerging" if profile.is_emerging else "normal",
                 })
-                logger.info(f"買入 {code}: {filled_shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%}")
+                label = "[興櫃]" if profile.is_emerging else ""
+                logger.info(f"買入{label} {code}: {filled_shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%}")
+
+    def _ta_confirm_buy(self, code: str) -> bool:
+        """
+        向 TradingAgents 確認是否買入。
+        用於興櫃股票的額外把關（require_ta=True）。
+        若 ENABLE_TA=false 或 TA 無回應，預設拒絕（保守策略）。
+        """
+        from trader.ta_signal import ENABLE_TA, get_ta_signal
+        if not ENABLE_TA:
+            logger.info(f"興櫃 {code}: ENABLE_TRADING_AGENTS=false，跳過（不買）")
+            return False
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            ta = get_ta_signal(code, today, mode="scan")
+            if ta is None:
+                return False
+            sig  = ta.get("signal", "HOLD")
+            conf = ta.get("confidence", 0.0)
+            approved = sig == "BUY" and conf >= 0.60
+            logger.info(f"🤖 TA 興櫃確認 {code}: {sig} 信心={conf:.0%} → {'✅核准' if approved else '❌拒絕'}")
+            return approved
+        except Exception as e:
+            logger.warning(f"TA 興櫃確認 {code} 失敗: {e}")
+            return False
 
     # ── Order Execution ───────────────────────────────────────────────────────
 
@@ -612,8 +686,12 @@ class TradingBot:
             return None
 
         from fubon_neo.sdk import Order
-        from fubon_neo.constant import BSAction, OrderType, PriceType, TimeInForce
-        market_type = self._odd_market_type()
+        from fubon_neo.constant import BSAction, MarketType, OrderType, PriceType, TimeInForce
+        # 興櫃用 Emg / EmgOdd，一般股票用零股市場
+        if code in EMERGING_TRADEABLE:
+            market_type = MarketType.Emg
+        else:
+            market_type = self._odd_market_type()
         limit_price = self._ai_limit_price(code, side, price, proba)
         if side == "BUY":
             bs = BSAction.Buy

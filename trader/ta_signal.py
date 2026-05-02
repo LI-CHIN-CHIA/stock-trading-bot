@@ -77,6 +77,7 @@ def get_ta_signal(
     code: str,
     trade_date: str | None = None,
     mode: Literal["holding", "scan"] = "scan",
+    ttl_override: int | None = None,
 ) -> dict | None:
     """
     呼叫 TradingAgents 多代理人框架，取得台股分析訊號。
@@ -96,8 +97,9 @@ def get_ta_signal(
         return None
 
     date_str  = trade_date or datetime.now().strftime("%Y-%m-%d")
-    ttl_min   = HOLDING_TTL_MIN if mode == "holding" else SCAN_TTL_MIN
-    cache_key = f"{code}:{date_str}:{mode}"
+    ttl_min   = ttl_override if ttl_override is not None else (
+                HOLDING_TTL_MIN if mode == "holding" else SCAN_TTL_MIN)
+    cache_key = f"{code}:{date_str}:{mode}:{ttl_min}"
     now       = datetime.now()
 
     with _cache_lock:
