@@ -929,11 +929,25 @@ class TradingBot:
             row = prepare_inference_row(df, code=code)
             if row.empty:
                 return None
-            signal = self.model.predict(row)
+            lgbm_signal = self.model.predict(row)
             # Attach latest ATR so callers can use it for trailing stop
             if "ATR" in row.columns:
-                signal["atr"] = float(row["ATR"].iloc[-1])
-            return signal
+                lgbm_signal["atr"] = float(row["ATR"].iloc[-1])
+
+            # ── TradingAgents 第二意見（若已啟用）───────────────────────────
+            try:
+                from trader.ta_signal import get_ta_signal, combine_signals
+                ta = get_ta_signal(code)
+                if ta is not None:
+                    combined = combine_signals(lgbm_signal, ta)
+                    if combined is not None:
+                        # 保留 atr 欄位（ta_signal 不含）
+                        combined.setdefault("atr", lgbm_signal.get("atr", 0.0))
+                        return combined
+            except Exception as ta_err:
+                logger.debug(f"TradingAgents 整合失敗: {ta_err}")
+
+            return lgbm_signal
         except Exception:
             return None
 
