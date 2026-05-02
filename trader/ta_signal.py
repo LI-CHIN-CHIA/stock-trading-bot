@@ -9,24 +9,28 @@ TradingAgents 台股整合模組
   TA_DEEP_MODEL=deepseek-r1:32b  深度思考模型（研究員/風控）
   TA_QUICK_MODEL=qwen2.5:7b      快速模型（分析師/交易員）
   TA_RESULTS_DIR=./data/ta_results  分析結果儲存目錄
+  TA_HOLDING_TTL_MIN=90        持倉監控快取時間（分鐘），預設90分鐘重新詢問
+  TA_SCAN_TTL_MIN=480          掃股買入快取時間（分鐘），預設480分鐘（同一天不重複掃）
 """
 
 import logging
 import os
 import threading
-from datetime import datetime
-from functools import lru_cache
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-ENABLE_TA    = os.getenv("ENABLE_TRADING_AGENTS", "false").lower() == "true"
-DEEP_MODEL   = os.getenv("TA_DEEP_MODEL",  "deepseek-r1:32b")
-QUICK_MODEL  = os.getenv("TA_QUICK_MODEL", "qwen2.5:7b")
-RESULTS_DIR  = Path(os.getenv("TA_RESULTS_DIR",
-                   Path(__file__).parent.parent / "data" / "ta_results"))
+ENABLE_TA        = os.getenv("ENABLE_TRADING_AGENTS", "false").lower() == "true"
+DEEP_MODEL       = os.getenv("TA_DEEP_MODEL",  "deepseek-r1:32b")
+QUICK_MODEL      = os.getenv("TA_QUICK_MODEL", "qwen2.5:7b")
+RESULTS_DIR      = Path(os.getenv("TA_RESULTS_DIR",
+                       Path(__file__).parent.parent / "data" / "ta_results"))
+HOLDING_TTL_MIN  = int(os.getenv("TA_HOLDING_TTL_MIN", "90"))   # 持倉監控快取（分鐘）
+SCAN_TTL_MIN     = int(os.getenv("TA_SCAN_TTL_MIN",    "480"))  # 掃股快取（分鐘）
 
-# 每支股票同一天只分析一次，避免重複呼叫
+# TTL 快取：{ cache_key -> {result: dict, expires_at: datetime} }
 _cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
 
@@ -69,13 +73,19 @@ def _get_graph():
     return _graph
 
 
-def get_ta_signal(code: str, trade_date: str | None = None) -> dict | None:
+def get_ta_signal(
+    code: str,
+    trade_date: str | None = None,
+    mode: Literal["holding", "scan"] = "scan",
+) -> dict | None:
     """
     呼叫 TradingAgents 多代理人框架，取得台股分析訊號。
 
     Args:
         code: 台股代號，如 "2330"（不含後綴）
         trade_date: 分析日期 YYYY-MM-DD，預設為今天
+        mode: "holding" = 持倉監控（快取 HOLDING_TTL_MIN 分鐘，頻繁重問）
+              "scan"    = 掃股買入（快取 SCAN_TTL_MIN 分鐘，避免重複）
 
     Returns:
         dict with keys: signal ("BUY"/"SELL"/"HOLD"), confidence (0~1),
@@ -85,17 +95,21 @@ def get_ta_signal(code: str, trade_date: str | None = None) -> dict | None:
     if not ENABLE_TA:
         return None
 
-    date_str = trade_date or datetime.now().strftime("%Y-%m-%d")
-    cache_key = f"{code}:{date_str}"
+    date_str  = trade_date or datetime.now().strftime("%Y-%m-%d")
+    ttl_min   = HOLDING_TTL_MIN if mode == "holding" else SCAN_TTL_MIN
+    cache_key = f"{code}:{date_str}:{mode}"
+    now       = datetime.now()
 
     with _cache_lock:
-        if cache_key in _cache:
-            logger.debug(f"TradingAgents 快取命中: {code} {date_str}")
-            return _cache[cache_key]
+        entry = _cache.get(cache_key)
+        if entry and now < entry["expires_at"]:
+            remaining = int((entry["expires_at"] - now).total_seconds() / 60)
+            logger.debug(f"TradingAgents 快取命中: {code} ({mode}, 剩餘{remaining}分鐘)")
+            return entry["result"]
 
     try:
         graph = _get_graph()
-        logger.info(f"TradingAgents 分析 {code} ({date_str})…")
+        logger.info(f"TradingAgents 分析 {code} ({date_str}, mode={mode})…")
         _state, decision = graph.propagate(code, date_str)
 
         signal = _parse_decision(decision)
@@ -104,12 +118,17 @@ def get_ta_signal(code: str, trade_date: str | None = None) -> dict | None:
             "confidence": _confidence_from_decision(decision),
             "full_decision": decision,
             "source": "trading_agents",
+            "queried_at": now.strftime("%Y-%m-%d %H:%M"),
         }
 
         with _cache_lock:
-            _cache[cache_key] = result
+            _cache[cache_key] = {
+                "result": result,
+                "expires_at": now + timedelta(minutes=ttl_min),
+            }
 
-        logger.info(f"TradingAgents {code}: {signal} (決策: {decision[:80]}…)")
+        logger.info(f"TradingAgents {code}: {signal} 信心={result['confidence']:.0%} "
+                    f"(決策: {decision[:60]}…)")
         return result
 
     except Exception as e:

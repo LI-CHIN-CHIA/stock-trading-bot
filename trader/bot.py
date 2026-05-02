@@ -417,10 +417,15 @@ class TradingBot:
                 else:
                     reason = f"停利 {pct_pnl:.1%}"
                     sell_proba = 0.80
-            # ── 4. AI sell signal ─────────────────────────────────────────────
+            # ── 4. LightGBM sell signal ───────────────────────────────────────
             elif signal and signal.get("signal") == "SELL" and signal.get("sell_proba", 0) >= 0.55:
                 sell_proba = signal["sell_proba"]
                 reason = f"AI賣出 {sell_proba:.0%}"
+            # ── 5. TradingAgents 主動詢問（每次監控都問，不受門檻限制）───────
+            else:
+                ta_opinion = self._get_ta_holding_opinion(code, h, price, pct_pnl)
+                if ta_opinion:
+                    reason, sell_proba = ta_opinion
 
             if reason:
                 proceeds = self._execute_sell(code, h["shares"], price, reason, proba=sell_proba)
@@ -440,6 +445,44 @@ class TradingBot:
                     logger.info(f"賣出 {code}: {reason}, 損益 {abs_pnl:+.0f} 元")
                 else:
                     logger.warning(f"⚠️  {code} 賣出未成交，繼續持有")
+
+    def _get_ta_holding_opinion(
+        self, code: str, h: dict, price: float, pct_pnl: float
+    ) -> tuple[str, float] | None:
+        """
+        每次監控都詢問 TradingAgents 對持倉股票的看法。
+        不受停損/停利門檻限制，只要 TA 明確建議賣就執行。
+
+        回傳 (reason, sell_proba) 或 None（不賣）。
+        """
+        from trader.ta_signal import ENABLE_TA, get_ta_signal
+        if not ENABLE_TA:
+            return None
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            ta = get_ta_signal(code, today, mode="holding")
+            if ta is None:
+                return None
+
+            ta_sig  = ta.get("signal", "HOLD")
+            ta_conf = ta.get("confidence", 0.0)
+
+            # TA 明確建議賣（信心 >= 0.60）→ 執行賣出
+            if ta_sig == "SELL" and ta_conf >= 0.60:
+                reason = f"TradingAgents建議賣出 (信心{ta_conf:.0%}, 損益{pct_pnl:+.1%})"
+                logger.info(f"🤖 TA {code}: SELL 信心={ta_conf:.0%} → 賣出")
+                return reason, ta_conf
+
+            # TA 建議繼續持有或買入 → 記錄 log 但不動作
+            hold_days = h.get("hold_days", 0)
+            logger.info(
+                f"🤖 TA {code}: {ta_sig} 信心={ta_conf:.0%} | "
+                f"持有{hold_days}天 損益{pct_pnl:+.1%} → 繼續持有"
+            )
+            return None
+        except Exception as e:
+            logger.debug(f"_get_ta_holding_opinion {code} 失敗: {e}")
+            return None
 
     def _scan_and_buy(self):
         if not can_open_position(self.holdings, self.cash, 1):
@@ -937,7 +980,7 @@ class TradingBot:
             # ── TradingAgents 第二意見（若已啟用）───────────────────────────
             try:
                 from trader.ta_signal import get_ta_signal, combine_signals
-                ta = get_ta_signal(code)
+                ta = get_ta_signal(code, mode="scan")
                 if ta is not None:
                     combined = combine_signals(lgbm_signal, ta)
                     if combined is not None:
