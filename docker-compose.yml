@@ -1,0 +1,32 @@
+# 單用戶啟動範例
+# 使用方式: docker compose up -d
+
+services:
+
+  # ── 交易機器人 ──────────────────────────────────────────────────────────────
+  trading-bot:
+    build: .
+    container_name: ai-trading-bot
+    restart: unless-stopped
+    env_file: .env                          # 憑證與帳號設定
+    environment:
+      - DATA_DIR=/data
+      - FUBON_CERT_PATH=/certs/cert.pfx     # 覆蓋 .env 裡的本機路徑
+    volumes:
+      - ./data:/data                        # 狀態、log、模型
+      - ./H124579788.pfx:/certs/cert.pfx    # 憑證檔案
+
+  # ── 監控 Dashboard ──────────────────────────────────────────────────────────
+  dashboard:
+    build: .
+    container_name: ai-trading-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+      - FUBON_CERT_PATH=/certs/cert.pfx
+    volumes:
+      - ./data:/data                        # 與 bot 共用同一份資料
+    ports:
+      - "8501:8501"                         # 開放遠端瀏覽器連線
+    command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501

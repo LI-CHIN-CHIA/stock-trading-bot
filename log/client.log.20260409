@@ -1,0 +1,24 @@
+[2026-04-09 09:10:00.640784782 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-09 09:10:00.674859182 +08:00 INFO] this account require 2fa
+[2026-04-09 09:10:00.721776978 +08:00 INFO] [future_option_mapping]: 35.27991ms
+[2026-04-09 09:10:00.731997945 +08:00 INFO] [future_option_mapping]: 7.901727ms
+[2026-04-09 09:10:00.798557796 +08:00 INFO] [future_option_mapping]: 66.400072ms
+[2026-04-09 09:10:00.811393899 +08:00 INFO] [future_option_mapping]: 9.188665ms
+[2026-04-09 09:10:00.837073718 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-09 09:10:01.258159747 +08:00 INFO] [bank remain]: 421.001385ms
+[2026-04-09 09:10:01.258641458 +08:00 INFO] [get inventories] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-09 09:10:01.272084976 +08:00 INFO] [inventory_result]: 13.404963ms
+[2026-04-09 09:10:01.272293626 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-09 09:10:01.281660860 +08:00 INFO] [order_result]: 9.338429ms
+[2026-04-09 16:23:45.435633471 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "2344", price_type: Limit, price: Some("95.69"), quantity: 80, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-09 16:23:45.435651401 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-09 16:23:45.450283412 +08:00 INFO] [place_order]: 14.67644ms
+[2026-04-09 16:23:45.450378372 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "2408", price_type: Limit, price: Some("211.15"), quantity: 36, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-09 16:23:45.450383240 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-09 16:23:45.460236628 +08:00 INFO] [place_order]: 9.859965ms
+[2026-04-09 16:23:45.460308922 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "6770", price_type: Limit, price: Some("54.54"), quantity: 137, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-09 16:23:45.460313300 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-09 16:23:45.470593758 +08:00 INFO] [place_order]: 10.285125ms
+[2026-04-09 20:09:21.792827393 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "2408", price_type: Limit, price: Some("211.15"), quantity: 36, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-09 20:09:21.792906354 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "2344", price_type: Limit, price: Some("92.82"), quantity: 81, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-09 20:09:21.792956576 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: Odd, sess: Some("1"), date: None, buy_sell: Buy, stock_no: "6770", price_type: Limit, price: Some("54.54"), quantity: 137, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false

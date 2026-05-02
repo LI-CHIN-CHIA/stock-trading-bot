@@ -1,0 +1,56 @@
+[2026-04-11 15:42:38.516618836 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-11 15:42:38.553687560 +08:00 INFO] this account require 2fa
+[2026-04-11 15:42:38.627159736 +08:00 INFO] [future_option_mapping]: 59.671975ms
+[2026-04-11 15:42:38.638632166 +08:00 INFO] [future_option_mapping]: 8.213264ms
+[2026-04-11 15:42:38.747148526 +08:00 INFO] [future_option_mapping]: 108.317606ms
+[2026-04-11 15:42:38.760639819 +08:00 INFO] [future_option_mapping]: 8.636348ms
+[2026-04-11 15:42:38.761108487 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:42:38.769126483 +08:00 INFO] [order_result]: 8.011402ms
+[2026-04-11 15:44:52.100114480 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-11 15:44:52.123002020 +08:00 INFO] this account require 2fa
+[2026-04-11 15:44:52.166222698 +08:00 INFO] [future_option_mapping]: 32.177507ms
+[2026-04-11 15:44:52.176312315 +08:00 INFO] [future_option_mapping]: 6.49907ms
+[2026-04-11 15:44:52.233352397 +08:00 INFO] [future_option_mapping]: 56.88874ms
+[2026-04-11 15:44:52.246392921 +08:00 INFO] [future_option_mapping]: 8.113775ms
+[2026-04-11 15:44:52.246900542 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:44:52.749268340 +08:00 INFO] [bank remain]: 502.247744ms
+[2026-04-11 15:44:52.749709003 +08:00 INFO] [get inventories] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:44:52.773917256 +08:00 INFO] [inventory_result]: 24.103554ms
+[2026-04-11 15:44:52.774357130 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:44:52.781009950 +08:00 INFO] [order_result]: 6.610876ms
+[2026-04-11 15:45:55.240705096 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-11 15:45:55.266928989 +08:00 INFO] this account require 2fa
+[2026-04-11 15:45:55.322109294 +08:00 INFO] [future_option_mapping]: 40.781008ms
+[2026-04-11 15:45:55.336861553 +08:00 INFO] [future_option_mapping]: 11.153859ms
+[2026-04-11 15:45:55.402902485 +08:00 INFO] [future_option_mapping]: 65.871521ms
+[2026-04-11 15:45:55.415561956 +08:00 INFO] [future_option_mapping]: 7.902185ms
+[2026-04-11 15:45:55.416101651 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:45:55.422430603 +08:00 INFO] [order_result]: 6.321958ms
+[2026-04-11 15:45:55.422660585 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081299854", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "2344", buy_sell: Buy, price_type: Limit, price: 96, quantity: 79, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 96, unit: 1, after_qty: 79, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "16:52:41.568", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.501443516 +08:00 INFO] [cancel_order]: 78.693176ms
+[2026-04-11 15:45:55.501649938 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081299855", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "2408", buy_sell: Buy, price_type: Limit, price: 221.45, quantity: 34, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 221.45, unit: 1, after_qty: 34, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "16:52:41.584", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.515300875 +08:00 INFO] [cancel_order]: 13.681206ms
+[2026-04-11 15:45:55.515354301 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081299856", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "6770", buy_sell: Buy, price_type: Limit, price: 56.51, quantity: 134, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 56.51, unit: 1, after_qty: 134, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "16:52:41.595", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.527678664 +08:00 INFO] [cancel_order]: 12.329807ms
+[2026-04-11 15:45:55.527717333 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081302445", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "2408", buy_sell: Buy, price_type: Limit, price: 221.45, quantity: 34, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 221.45, unit: 1, after_qty: 34, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "21:18:08.677", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.537595814 +08:00 INFO] [cancel_order]: 9.884169ms
+[2026-04-11 15:45:55.537618274 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081302446", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "2344", buy_sell: Buy, price_type: Limit, price: 96.31, quantity: 79, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 96.31, unit: 1, after_qty: 79, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "21:18:08.692", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.547185344 +08:00 INFO] [cancel_order]: 9.567508ms
+[2026-04-11 15:45:55.547203107 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081302447", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "6770", buy_sell: Buy, price_type: Limit, price: 56.51, quantity: 134, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 56.51, unit: 1, after_qty: 134, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "21:18:08.704", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.556867077 +08:00 INFO] [cancel_order]: 9.658971ms
+[2026-04-11 15:45:55.556893944 +08:00 INFO] [cancel_order] order=OrderResult { function_type: None, date: "2026/04/13", seq_no: "02081302448", branch_no: "20706", account: "935018", order_no: None, asset_type: 0, market: "TAIEX", market_type: Odd, stock_no: "3481", buy_sell: Buy, price_type: Limit, price: 26.26, quantity: 285, time_in_force: ROD, order_type: Stock, is_pre_order: true, status: 0, after_price_type: None, after_price: 26.26, unit: 1, after_qty: 285, filled_qty: 0, filled_money: 0, before_qty: None, before_price: None, user_def: " ", last_time: "21:18:08.718", details: None, error_message: None }, is_async=false
+[2026-04-11 15:45:55.566667943 +08:00 INFO] [cancel_order]: 9.775949ms
+[2026-04-11 15:46:22.342921652 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-11 15:46:22.377479855 +08:00 INFO] this account require 2fa
+[2026-04-11 15:46:22.421610482 +08:00 INFO] [future_option_mapping]: 30.920362ms
+[2026-04-11 15:46:22.431867723 +08:00 INFO] [future_option_mapping]: 7.617917ms
+[2026-04-11 15:46:22.516749320 +08:00 INFO] [future_option_mapping]: 84.708143ms
+[2026-04-11 15:46:22.530776785 +08:00 INFO] [future_option_mapping]: 8.594834ms
+[2026-04-11 15:46:22.532485115 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:46:22.964865250 +08:00 INFO] [bank remain]: 432.230886ms
+[2026-04-11 15:46:22.965169720 +08:00 INFO] [get inventories] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:46:22.989011873 +08:00 INFO] [inventory_result]: 23.74182ms
+[2026-04-11 15:46:22.989384964 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:46:22.996539149 +08:00 INFO] [order_result]: 7.104889ms
+[2026-04-11 15:46:22.996978366 +08:00 INFO] [unrealized gains and loses] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-11 15:46:23.031325871 +08:00 INFO] [inventory_stock_detail_result]: 34.302822ms

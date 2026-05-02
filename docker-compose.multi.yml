@@ -1,0 +1,65 @@
+# 多用戶範例：每個用戶各自獨立的 bot + dashboard
+# 使用方式: docker compose -f docker-compose.multi.yml up -d
+#
+# 每個用戶需要準備:
+#   - 自己的 .env 檔（帳號密碼）
+#   - 自己的 .pfx 憑證
+#   - 自己的 data 目錄
+
+services:
+
+  # ══════════════════════════════════════════
+  #  用戶 A（範例：小明）
+  # ══════════════════════════════════════════
+  bot-user-a:
+    build: .
+    container_name: bot-user-a
+    restart: unless-stopped
+    env_file: ./users/user-a/.env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./users/user-a/data:/data
+      - ./users/user-a/cert.pfx:/certs/cert.pfx
+    command: python trading_bot.py
+
+  dashboard-user-a:
+    build: .
+    container_name: dashboard-user-a
+    restart: unless-stopped
+    env_file: ./users/user-a/.env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./users/user-a/data:/data
+    ports:
+      - "8501:8501"                         # 小明的 dashboard: http://host:8501
+    command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501
+
+  # ══════════════════════════════════════════
+  #  用戶 B（範例：小華）
+  # ══════════════════════════════════════════
+  bot-user-b:
+    build: .
+    container_name: bot-user-b
+    restart: unless-stopped
+    env_file: ./users/user-b/.env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./users/user-b/data:/data
+      - ./users/user-b/cert.pfx:/certs/cert.pfx
+    command: python trading_bot.py
+
+  dashboard-user-b:
+    build: .
+    container_name: dashboard-user-b
+    restart: unless-stopped
+    env_file: ./users/user-b/.env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./users/user-b/data:/data
+    ports:
+      - "8502:8501"                         # 小華的 dashboard: http://host:8502
+    command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501

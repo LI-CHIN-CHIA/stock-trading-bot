@@ -1,0 +1,38 @@
+[2026-04-23 09:10:00.969502497 +08:00 INFO] [login] personal_id="H124579788"
+[2026-04-23 09:10:01.184861552 +08:00 INFO] this account require 2fa
+[2026-04-23 09:10:01.532478728 +08:00 INFO] [future_option_mapping]: 264.682002ms
+[2026-04-23 09:10:01.601883397 +08:00 INFO] [future_option_mapping]: 66.01025ms
+[2026-04-23 09:10:01.866554354 +08:00 INFO] [future_option_mapping]: 264.127004ms
+[2026-04-23 09:10:01.911331527 +08:00 INFO] [future_option_mapping]: 40.981987ms
+[2026-04-23 09:10:01.918510237 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 09:10:01.977436974 +08:00 INFO] [bank remain]: 58.896597ms
+[2026-04-23 09:10:01.977494375 +08:00 INFO] [get inventories] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 09:10:02.062543753 +08:00 INFO] [inventory_result]: 84.966761ms
+[2026-04-23 09:10:02.063158338 +08:00 INFO] [unrealized gains and loses] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 09:10:02.205800176 +08:00 INFO] [inventory_stock_detail_result]: 142.525368ms
+[2026-04-23 09:10:02.206494944 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 09:10:02.287469122 +08:00 INFO] [order_result]: 80.868481ms
+[2026-04-23 09:10:12.815130398 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "2408", price_type: Limit, price: Some("240.88"), quantity: 22, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 09:10:12.815142344 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 09:10:12.831892596 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "2409", price_type: Limit, price: Some("20.4"), quantity: 261, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 09:10:12.831899901 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 09:10:12.871917023 +08:00 INFO] [place_order]: 40.001568ms
+[2026-04-23 09:10:22.872451172 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 09:10:22.881803653 +08:00 INFO] [order_result]: 9.287508ms
+[2026-04-23 09:10:22.882914188 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "1303", price_type: Limit, price: Some("98.33"), quantity: 43, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 09:10:22.882966667 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 09:10:22.900828804 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "2344", price_type: Limit, price: Some("99.65"), quantity: 42, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 09:10:22.900844988 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 09:10:22.917709660 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "1326", price_type: Limit, price: Some("55.65"), quantity: 76, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 09:10:22.917732101 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 13:20:15.628711648 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "2408", price_type: Limit, price: Some("231.53"), quantity: 23, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 13:20:15.628723592 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 13:20:15.675262974 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "2344", price_type: Limit, price: Some("96.68"), quantity: 55, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 13:20:15.675282479 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 13:20:15.718000755 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "6770", price_type: Limit, price: Some("58.4"), quantity: 91, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 13:20:15.718024456 +08:00 WARN] [place_order] user_def contains invalid characters: '_'
+[2026-04-23 13:20:15.764691993 +08:00 INFO] [place_order]: 46.688256ms
+[2026-04-23 13:20:25.765231811 +08:00 INFO] [get_order_results] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-04-23 13:20:25.772773209 +08:00 INFO] [order_result]: 7.484983ms
+[2026-04-23 13:20:25.773994274 +08:00 INFO] [place_order] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" },order=Order { oxtp: NewOrder, market_type: IntradayOdd, sess: Some("0"), date: None, buy_sell: Buy, stock_no: "1303", price_type: Limit, price: Some("93.93"), quantity: 42, time_in_force: ROD, order_type: Stock, user_def: Some("AI_BOT") }, is_async=false
+[2026-04-23 13:20:25.774033318 +08:00 WARN] [place_order] user_def contains invalid characters: '_'

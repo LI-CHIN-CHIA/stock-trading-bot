@@ -1,0 +1,32 @@
+[2026-03-22 14:57:06.593561744 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-22 14:57:06.628874387 +08:00 INFO] this account require 2fa
+[2026-03-22 14:57:06.671869770 +08:00 INFO] [future_option_mapping]: 30.354555ms
+[2026-03-22 14:57:06.681288371 +08:00 INFO] [future_option_mapping]: 6.529833ms
+[2026-03-22 14:57:06.737140569 +08:00 INFO] [future_option_mapping]: 55.655142ms
+[2026-03-22 14:57:06.748197002 +08:00 INFO] [future_option_mapping]: 7.150978ms
+[2026-03-22 14:57:21.486269328 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-22 14:57:21.511158594 +08:00 INFO] this account require 2fa
+[2026-03-22 14:57:21.553498304 +08:00 INFO] [future_option_mapping]: 30.802508ms
+[2026-03-22 14:57:21.564474712 +08:00 INFO] [future_option_mapping]: 7.443207ms
+[2026-03-22 14:57:21.626924870 +08:00 INFO] [future_option_mapping]: 62.270019ms
+[2026-03-22 14:57:21.641664971 +08:00 INFO] [future_option_mapping]: 9.56939ms
+[2026-03-22 14:57:33.604836918 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-22 14:57:33.628423476 +08:00 INFO] this account require 2fa
+[2026-03-22 14:57:33.671789574 +08:00 INFO] [future_option_mapping]: 33.079043ms
+[2026-03-22 14:57:33.681233286 +08:00 INFO] [future_option_mapping]: 7.037715ms
+[2026-03-22 14:57:33.760455068 +08:00 INFO] [future_option_mapping]: 79.091498ms
+[2026-03-22 14:57:33.773370345 +08:00 INFO] [future_option_mapping]: 8.340684ms
+[2026-03-22 14:57:41.190124548 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-22 14:57:41.222970609 +08:00 INFO] this account require 2fa
+[2026-03-22 14:57:41.261352164 +08:00 INFO] [future_option_mapping]: 27.519597ms
+[2026-03-22 14:57:41.271552359 +08:00 INFO] [future_option_mapping]: 7.530217ms
+[2026-03-22 14:57:41.324248528 +08:00 INFO] [future_option_mapping]: 52.527133ms
+[2026-03-22 14:57:41.337076216 +08:00 INFO] [future_option_mapping]: 8.405024ms
+[2026-03-22 14:57:51.334136246 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-22 14:57:51.357851346 +08:00 INFO] this account require 2fa
+[2026-03-22 14:57:51.397941127 +08:00 INFO] [future_option_mapping]: 28.884793ms
+[2026-03-22 14:57:51.408018078 +08:00 INFO] [future_option_mapping]: 6.98024ms
+[2026-03-22 14:57:51.486461706 +08:00 INFO] [future_option_mapping]: 78.2766ms
+[2026-03-22 14:57:51.499380118 +08:00 INFO] [future_option_mapping]: 8.712299ms
+[2026-03-22 14:57:51.500409208 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-03-22 14:57:51.942548066 +08:00 INFO] [bank remain]: 442.024248ms

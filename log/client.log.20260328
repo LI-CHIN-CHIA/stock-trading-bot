@@ -1,0 +1,12 @@
+[2026-03-28 02:08:18.353087276 +08:00 INFO] [login] personal_id="H124579788"
+[2026-03-28 02:08:18.387440462 +08:00 INFO] this account require 2fa
+[2026-03-28 02:08:18.439767103 +08:00 INFO] [future_option_mapping]: 37.498826ms
+[2026-03-28 02:08:18.452921184 +08:00 INFO] [future_option_mapping]: 9.864608ms
+[2026-03-28 02:08:18.550445149 +08:00 INFO] [future_option_mapping]: 97.293425ms
+[2026-03-28 02:08:18.564577987 +08:00 INFO] [future_option_mapping]: 9.542622ms
+[2026-03-28 02:08:18.565888336 +08:00 INFO] [bank remain] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-03-28 02:08:19.038003609 +08:00 INFO] [bank remain]: 472.057445ms
+[2026-03-28 02:08:19.038859955 +08:00 INFO] [get inventories] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-03-28 02:08:19.055364620 +08:00 INFO] [inventory_result]: 16.481998ms
+[2026-03-28 02:08:19.055416219 +08:00 INFO] [unrealized gains and loses] account=Account { branch_no: "20706", account: "935018", account_type: "stock", name: "李晉嘉" }
+[2026-03-28 02:08:19.087871544 +08:00 INFO] [inventory_stock_detail_result]: 32.416764ms

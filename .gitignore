@@ -1,0 +1,36 @@
+# Environment
+.env
+*.pfx
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Data & models
+data/
+ai/models/
+*.pkl
+*.sqlite
+*.db
+
+# Logs & state
+*.log
+daily_report.json
+retrain_history.json
+trader_state.json
+
+# Cache
+.cache/
+catboost_info/
+
+# Claude
+.claude/
+
+# IDE
+.vscode/
+*.swp

@@ -1,0 +1,16 @@
+[Core]
+; 富邦 Fugle Trade API endpoint
+Entry = https://api.fugle.tw/trade/v1.0
+
+[User]
+; 你的富邦帳號
+Account = YOUR_ACCOUNT_NUMBER
+
+[Cert]
+; .p12 憑證檔案路徑 (向富邦申請)
+Path = /path/to/your/cert.p12
+
+[Api]
+; Fugle API Key 和 Secret (從 developer.fugle.tw 申請)
+Key = YOUR_API_KEY
+Secret = YOUR_API_SECRET
