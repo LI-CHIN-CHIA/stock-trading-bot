@@ -36,8 +36,12 @@ logger = logging.getLogger(__name__)
 # DATA_DIR 可由環境變數指定，預設為專案根目錄
 # Docker 部署時設為 /data，讓每個用戶掛載自己的 volume
 DATA_DIR     = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent))
-STATE_FILE   = DATA_DIR / "trader_state.json"
 RETRAIN_LOG  = DATA_DIR / "retrain_history.json"
+
+def _state_file(paper: bool) -> Path:
+    """紙上交易與實盤使用不同 state 檔，避免互相污染。"""
+    name = "paper_trader_state.json" if paper else "trader_state.json"
+    return DATA_DIR / name
 
 
 def get_symbol(code: str) -> str:
@@ -59,8 +63,9 @@ class TradingBot:
         self.trade_log: list = []
         # 掛單追蹤: order_no -> {side, code, shares, price, placed_at, retries, reason}
         self.pending_orders: dict = {}
-        # 紙上交易模式：不送真實委託，模擬成交
+        # 紙上交易模式：不送真實委託，模擬成交；使用獨立 state 檔
         self.paper_trading: bool = os.getenv("PAPER_TRADING", "true").lower() == "true"
+        self._state_file = _state_file(self.paper_trading)
         self._load_state()
 
     # ── SDK Login ─────────────────────────────────────────────────────────────
@@ -1134,13 +1139,13 @@ class TradingBot:
             "last_retrain": str(last) if last else None,
             "last_emergency_retrain": getattr(self, "_last_emergency_retrain", None),
         }
-        with open(STATE_FILE, "w") as f:
+        with open(self._state_file, "w") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, default=str)
 
     def _load_state(self):
-        if STATE_FILE.exists():
+        if self._state_file.exists():
             try:
-                with open(STATE_FILE) as f:
+                with open(self._state_file) as f:
                     state = json.load(f)
                 self.cash = state.get("cash", self.cash)
                 self.holdings = state.get("holdings", {})
