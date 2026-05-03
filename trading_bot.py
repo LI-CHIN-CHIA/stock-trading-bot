@@ -154,8 +154,10 @@ def job_daily_summary():
                           "entry": h["entry_price"], "close": price, "pnl_pct": round(pct, 4)})
 
     total_value = bot.cash + holding_value
+    paper = bot.paper_trading
     report = {
         "date": today,
+        "paper_trading": paper,
         "cash": round(bot.cash, 0),
         "holding_value": round(holding_value, 0),
         "total_value": round(total_value, 0),
@@ -167,7 +169,9 @@ def job_daily_summary():
     }
 
     import os as _os, json as _json
-    report_path = Path(_os.getenv("DATA_DIR", Path(__file__).parent)) / "daily_report.json"
+    # paper trading 存到獨立檔案，避免與實盤記錄混淆
+    filename = "paper_daily_report.json" if paper else "daily_report.json"
+    report_path = Path(_os.getenv("DATA_DIR", Path(__file__).parent)) / filename
     history = []
     if report_path.exists():
         try:
@@ -175,21 +179,23 @@ def job_daily_summary():
                 history = _json.load(f)
         except Exception:
             history = []
-    # 覆蓋同一天的紀錄
     history = [r for r in history if r.get("date") != today]
     history.append(report)
     with open(report_path, "w") as f:
         _json.dump(history, f, ensure_ascii=False, indent=2, default=str)
 
+    mode_tag = "📄[紙上交易]" if paper else "📊"
     logger.info("=" * 55)
-    logger.info(f"📊 每日結算 {today}")
-    logger.info(f"   現金:       {bot.cash:,.0f} 元")
-    logger.info(f"   持倉市值:   {holding_value:,.0f} 元")
-    logger.info(f"   總資產:     {total_value:,.0f} 元")
+    logger.info(f"{mode_tag} 每日結算 {today}")
+    logger.info(f"   現金:         {bot.cash:,.0f} 元")
+    logger.info(f"   持倉市值:     {holding_value:,.0f} 元")
+    logger.info(f"   總資產:       {total_value:,.0f} 元")
     logger.info(f"   今日實現損益: {realized_pnl:+.0f} 元")
-    logger.info(f"   今日買入:   {len(buys)} 筆  賣出: {len(sells)} 筆")
+    logger.info(f"   今日買入:     {len(buys)} 筆  賣出: {len(sells)} 筆")
     for p in positions:
         logger.info(f"   持倉 {p['ticker']}: {p['shares']}股 損益 {p['pnl_pct']:+.1%}")
+    if paper:
+        logger.info("   ⚠️  以上為模擬交易，未產生真實損益")
     logger.info("=" * 55)
 
 
@@ -212,11 +218,15 @@ def job_retrain(reason: str = "每日排程"):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    paper = bot.paper_trading
+    mode_label = "📄 紙上交易（模擬）" if paper else "🔴 實盤交易"
     logger.info("=" * 55)
-    logger.info("  AI 自動交易機器人 啟動")
+    logger.info(f"  AI 自動交易機器人 啟動  [{mode_label}]")
     logger.info(f"  時區: Asia/Taipei (UTC+8)")
-    logger.info(f"  資金: NT$20,000 | 最大持倉: 3 支")
-    logger.info(f"  停損: -10% | 停利: +15% | 最大持有: 20 天")
+    logger.info(f"  資金: NT${bot.cash:,.0f} | 最大持倉: 5 支")
+    if paper:
+        logger.info("  ⚠️  所有買賣均為模擬，不會送出真實委託")
+        logger.info("  ⚠️  切換實盤請在 .env 設定 PAPER_TRADING=false")
     logger.info("=" * 55)
 
     # 啟動時先載入模型

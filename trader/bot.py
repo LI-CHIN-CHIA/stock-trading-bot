@@ -59,12 +59,17 @@ class TradingBot:
         self.trade_log: list = []
         # 掛單追蹤: order_no -> {side, code, shares, price, placed_at, retries, reason}
         self.pending_orders: dict = {}
+        # 紙上交易模式：不送真實委託，模擬成交
+        self.paper_trading: bool = os.getenv("PAPER_TRADING", "true").lower() == "true"
         self._load_state()
 
     # ── SDK Login ─────────────────────────────────────────────────────────────
 
     def login(self) -> bool:
         """Login to Fubon SDK and register real-time fill callbacks."""
+        if self.paper_trading:
+            logger.info("📄 紙上交易模式：跳過 SDK 登入，使用模擬帳戶")
+            return True
         try:
             from fubon_neo.sdk import FubonSDK
             self.sdk = FubonSDK()
@@ -243,8 +248,8 @@ class TradingBot:
         因此用「富邦餘額 - 未交割買入成本」作為有效可用現金。
         Falls back gracefully if SDK is not connected.
         """
-        if self.sdk is None or self.account is None:
-            return
+        if self.paper_trading or self.sdk is None or self.account is None:
+            return  # paper mode 直接使用本地現金記錄
         try:
             result = self.sdk.accounting.bank_remain(self.account)
             if result.is_success and result.data:
@@ -722,8 +727,13 @@ class TradingBot:
         """
         Place buy order. Check immediately; if not filled, add to pending_orders.
         Returns filled shares if immediately confirmed, 0 otherwise (pending).
-        Simulation mode returns shares directly.
+        Paper trading mode: simulate fill immediately at requested price.
         """
+        if self.paper_trading:
+            cost = buy_cost(shares, price)
+            logger.info(f"📄 [紙上交易] 模擬買入 {code}: {shares}股 @ {price:.2f} "
+                        f"成本={cost:,.0f}元 AI信心={proba:.0%}")
+            return shares
         if self.sdk is None or self.account is None:
             logger.warning("SDK未連線，模擬買入")
             return shares
@@ -752,7 +762,13 @@ class TradingBot:
         """
         Place sell order. Check immediately; if not filled, add to pending_orders.
         Returns net proceeds if immediately confirmed, 0 otherwise (pending).
+        Paper trading mode: simulate fill immediately at requested price.
         """
+        if self.paper_trading:
+            proceeds = sell_proceeds(shares, price)
+            logger.info(f"📄 [紙上交易] 模擬賣出 {code}: {shares}股 @ {price:.2f} "
+                        f"回收={proceeds:,.0f}元 原因={reason}")
+            return proceeds
         if self.sdk is None or self.account is None:
             logger.warning("SDK未連線，模擬賣出")
             return sell_proceeds(shares, price)
@@ -938,8 +954,8 @@ class TradingBot:
         Removes any local holding that doesn't exist in the real account.
         Also cancels pending orders that were already rejected.
         """
-        if self.sdk is None or self.account is None:
-            return
+        if self.paper_trading or self.sdk is None or self.account is None:
+            return  # paper mode 直接使用本地持倉記錄
         try:
             # ── 1. 雙向持倉同步 ───────────────────────────────────────────
             inv = self.sdk.accounting.inventories(self.account)
