@@ -123,6 +123,9 @@ def build_feature_matrix(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
                     "institution_buy_streak"]:
             feats[col] = 0.0
 
+    # ── Group 9: 社群情緒（訓練時填 0，推理時由 prepare_inference_row 覆寫）─────
+    feats["sentiment_score"] = 0.0
+
     # Drop warmup rows with NaN (need MA60 + lags + ROC10)
     feats = feats.replace([np.inf, -np.inf], np.nan)
     feats = feats.dropna()
@@ -150,15 +153,25 @@ def build_target(
     return target
 
 
-def prepare_inference_row(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
+def prepare_inference_row(
+    df: pd.DataFrame,
+    code: str = "",
+    sentiment_score: float = 0.0,
+) -> pd.DataFrame:
     """
     Build feature matrix and return only the last row for live inference.
-    code: stock code (e.g. '2330') used to fetch institutional data.
+
+    code:            stock code (e.g. '2330') used to fetch institutional data.
+    sentiment_score: PTT/Threads/News composite score in [-1, 1].
+                     Defaults to 0.0 (neutral) when sentiment is unavailable.
+                     Not used during training — the column is zero-filled there.
     """
     feats = build_feature_matrix(df, code=code)
     if feats.empty:
         return feats
-    return feats.iloc[[-1]]
+    row = feats.iloc[[-1]].copy()
+    row["sentiment_score"] = float(np.clip(sentiment_score, -1.0, 1.0))
+    return row
 
 
 def get_feature_names() -> list[str]:
@@ -187,4 +200,6 @@ def get_feature_names() -> list[str]:
         # Group 8: 三大法人
         "foreign_net_ratio", "trust_net_ratio", "institution_net_ratio",
         "foreign_buy_streak", "institution_buy_streak",
+        # Group 9: 社群情緒
+        "sentiment_score",
     ]

@@ -1,5 +1,5 @@
 lightgbm==4.6.0
-pandas==2.3.3
+pandas>=3.0.1
 pandas-ta==0.4.71b0
 pandas_market_calendars==5.3.1.2
 plotly==6.5.2
