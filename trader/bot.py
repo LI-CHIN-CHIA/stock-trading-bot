@@ -575,19 +575,10 @@ class TradingBot:
         if profile is None:
             profile = get_risk_profile(code)
 
-        # ── 最短持有期：一般 2 天，興櫃 1 天 ────────────────────────────────
         days_held = self._days_held(h)
 
-        min_hold = 1 if profile.is_emerging else 2
-        if days_held < min_hold:
-            logger.info(
-                f"🤖 TA {code}: 持有僅 {days_held} 天（最短 {min_hold} 天），跳過 TA 賣出"
-            )
-            return None
-
-        # ── 持有 < 5 天且損益未達門檻：讓部位繼續發展 ─────────────────────
-        # 損失超過 3% 或獲利超過 5% 才允許 TA 介入
-        if days_held < 5 and abs(pct_pnl) < 0.03:
+        # 持有 1 天以上且損益未達 ±3%：讓部位有時間發展（當天不受此限）
+        if days_held >= 1 and days_held < 5 and abs(pct_pnl) < 0.03:
             logger.info(
                 f"🤖 TA {code}: 持有 {days_held} 天，損益 {pct_pnl:+.1%} 未達介入門檻（±3%），繼續持有"
             )
