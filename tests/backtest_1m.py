@@ -303,9 +303,10 @@ def run_all(period: str = "1mo", verbose: bool = True) -> list[BacktestResult]:
     print("=" * 60)
 
     # 1. 下載資料
-    # 技術指標需要至少 80 天（MA60+buffer），因此下載 6mo 但只測試最後 period
+    # 技術指標需要至少 80 天（MA60+buffer），因此下載期間 = 測試期 + 3mo warmup
     codes = [c for c in TRADEABLE if c not in {"0050", "0056", "00878", "006208", "00713"}]
-    download_period = "6mo"  # 固定下載 6 個月以確保特徵可計算
+    _dl_map = {"1mo": "6mo", "3mo": "1y", "6mo": "1y", "1y": "2y", "2y": "5y"}
+    download_period = _dl_map.get(period, "1y")
     print(f"\n📥 下載 {len(codes)} 支股票資料 (download={download_period}, test={period})…")
 
     raw_data: dict = {}

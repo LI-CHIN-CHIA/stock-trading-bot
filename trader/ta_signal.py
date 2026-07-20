@@ -23,6 +23,7 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 ENABLE_TA        = os.getenv("ENABLE_TRADING_AGENTS", "false").lower() == "true"
+ENABLE_PTT       = os.getenv("ENABLE_PTT_SENTIMENT", "true").lower() == "true"
 DEEP_MODEL       = os.getenv("TA_DEEP_MODEL",  "deepseek-r1:32b")
 QUICK_MODEL      = os.getenv("TA_QUICK_MODEL", "qwen2.5:7b")
 RESULTS_DIR      = Path(os.getenv("TA_RESULTS_DIR",
@@ -33,6 +34,7 @@ SCAN_TTL_MIN     = int(os.getenv("TA_SCAN_TTL_MIN",    "480"))  # 掃股快取�
 # TTL 快取：{ cache_key -> {result: dict, expires_at: datetime} }
 _cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
+_log_lock   = threading.Lock()
 
 
 def _build_graph():
@@ -112,12 +114,23 @@ def get_ta_signal(
     try:
         graph = _get_graph()
         logger.info(f"TradingAgents 分析 {code} ({date_str}, mode={mode})…")
-        _state, decision = graph.propagate(code, date_str)
+        state, recommendation = graph.propagate(code, date_str)
 
-        signal = _parse_decision(decision)
+        # v0.7.0+ returns TradeRecommendation object; v0.3.x returns plain str
+        if isinstance(recommendation, str):
+            decision = recommendation
+            signal = _parse_decision(decision)
+            confidence = _confidence_from_decision(decision)
+        else:
+            # TradeRecommendation Pydantic model
+            sig_val = recommendation.signal
+            decision = str(sig_val.value if hasattr(sig_val, "value") else sig_val)
+            signal = _parse_decision(decision)
+            confidence = float(recommendation.confidence)
+
         result = {
             "signal": signal,
-            "confidence": _confidence_from_decision(decision),
+            "confidence": confidence,
             "full_decision": decision,
             "source": "trading_agents",
             "queried_at": now.strftime("%Y-%m-%d %H:%M"),
@@ -128,14 +141,102 @@ def get_ta_signal(
                 "result": result,
                 "expires_at": now + timedelta(minutes=ttl_min),
             }
+            # 清除已過期的 entry，防止 _cache 無限成長
+            expired_keys = [k for k, v in _cache.items() if now >= v["expires_at"]]
+            for k in expired_keys:
+                del _cache[k]
+
+        # ── PTT 情緒加權 ─────────────────────────────────────────────────
+        ptt = None
+        if ENABLE_PTT and mode == "scan":
+            try:
+                from utils.forum_sentiment import get_forum_sentiment
+                from utils.constants import STOCK_DB
+                company_name = STOCK_DB.get(code, {}).get("name", "") if isinstance(STOCK_DB.get(code), dict) else ""
+                ptt = get_forum_sentiment(code, company_name, days=5)
+                # 情緒與訊號方向一致 → 提升信心；方向相反 → 降低信心
+                if ptt["post_count"] >= 3:
+                    boost = ptt["score"] * 0.1   # 最多 ±10% 調整
+                    if signal == "BUY":
+                        result["confidence"] = min(0.95, result["confidence"] + boost)
+                    elif signal == "SELL":
+                        result["confidence"] = min(0.95, result["confidence"] - boost)
+                    logger.info(
+                        f"PTT 情緒 {code}: {ptt['label']} (分數={ptt['score']:+.2f}, "
+                        f"文章={ptt['post_count']}篇) → 調整信心至 {result['confidence']:.0%}"
+                    )
+                result["ptt_sentiment"] = ptt
+            except Exception as e:
+                logger.debug(f"PTT 情緒整合失敗 ({code}): {e}")
+
+        # ── 儲存完整溝通紀錄 ─────────────────────────────────────────────
+        _save_ta_log(code, date_str, mode, signal, result["confidence"], decision, state, now, ptt)
 
         logger.info(f"TradingAgents {code}: {signal} 信心={result['confidence']:.0%} "
-                    f"(決策: {decision[:60]}…)")
+                    f"(決策: {str(decision)[:60]}…)")
         return result
 
     except Exception as e:
         logger.warning(f"TradingAgents 分析 {code} 失敗: {e}")
         return None
+
+
+def _save_ta_log(
+    code: str, date_str: str, mode: str,
+    signal: str, confidence: float,
+    decision: str, state: dict | None, queried_at: datetime,
+    ptt: dict | None = None,
+) -> None:
+    """將 TradingAgents 完整溝通記錄寫入 JSONL 檔案。"""
+    import json
+    log_dir = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent / "data"))
+    log_path = log_dir / "ta_signal_log.jsonl"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 從 AgentState 取出各分析師報告
+    messages: list[dict] = []
+    if state is not None:
+        report_fields = {
+            "market":       "market_report",
+            "news":         "news_report",
+            "social_media": "sentiment_report",
+            "fundamentals": "fundamentals_report",
+        }
+        for agent, field in report_fields.items():
+            content = getattr(state, field, None)
+            if content and isinstance(content, str) and content.strip():
+                messages.append({"agent": agent, "content": content})
+        # LangChain messages（對話歷史）
+        lc_messages = getattr(state, "messages", None) or []
+        for msg in lc_messages:
+            content = getattr(msg, "content", None)
+            role = getattr(msg, "type", getattr(msg, "role", "unknown"))
+            if content and isinstance(content, str) and content.strip():
+                messages.append({"agent": "conversation", "role": role, "content": content})
+
+    record = {
+        "queried_at": queried_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "code": code,
+        "date": date_str,
+        "mode": mode,
+        "signal": signal,
+        "confidence": round(confidence, 3),
+        "final_decision": decision,
+        "messages": messages,
+        "ptt_sentiment": {
+            "score":      ptt.get("score"),
+            "label":      ptt.get("label"),
+            "post_count": ptt.get("post_count"),
+            "summary":    ptt.get("summary"),
+        } if ptt else None,
+    }
+
+    try:
+        with _log_lock:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning(f"TradingAgents log 儲存失敗: {e}")
 
 
 def _parse_decision(decision: str) -> str:
@@ -152,11 +253,19 @@ def _confidence_from_decision(decision: str) -> float:
     """根據決策文字的強度給一個粗略信心分數（0.5 ~ 0.95）。"""
     upper = decision.upper()
     strong_buy  = any(w in upper for w in ["STRONG BUY", "STRONGLY BUY", "CONFIDENTLY BUY"])
-    strong_sell = any(w in upper for w in ["STRONG SELL", "STRONGLY SELL"])
-    if strong_buy or strong_sell:
+    strong_sell = any(w in upper for w in ["STRONG SELL", "STRONGLY SELL", "CONFIDENTLY SELL"])
+    moderate_sell = any(w in upper for w in ["MODERATE SELL", "LEAN SELL", "SLIGHT SELL"])
+    if strong_buy:
         return 0.90
-    if "BUY" in upper or "SELL" in upper:
+    if strong_sell:
+        return 0.85
+    if moderate_sell:
+        return 0.72
+    if "BUY" in upper:
         return 0.70
+    if "SELL" in upper:
+        # 普通 SELL（無強度修飾詞）→ 0.68，低於一般股票門檻 0.75，需更明確才觸發
+        return 0.68
     return 0.55  # HOLD or ambiguous
 
 

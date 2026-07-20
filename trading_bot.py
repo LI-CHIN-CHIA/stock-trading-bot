@@ -2,6 +2,7 @@
 自動交易排程主程式
 ==================
 時間表 (Asia/Taipei, UTC+8):
+  08:30  週一~週五  → 開盤前選股發現（PTT/三大法人掃描，動態更新清單）
   09:10  週一~週五  → 掃描選股、開新倉位
   每15分 09:10~13:25 → 監控停損/停利
   13:30               → 收盤掃描（最後一次）
@@ -32,14 +33,15 @@ import os
 DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = DATA_DIR / "trading.log"
+_handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
+# 只在互動終端（非 systemd/nohup）加控制台輸出，避免 systemd append: 重複寫入
+if sys.stdout.isatty():
+    _handlers.append(logging.StreamHandler(sys.stdout))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-    ],
+    handlers=_handlers,
 )
 logger = logging.getLogger("bot")
 
@@ -76,6 +78,32 @@ def within_market_hours() -> bool:
 
 # ── Job Definitions ───────────────────────────────────────────────────────────
 
+def job_stock_discovery():
+    """
+    08:30 — 開盤前選股發現任務：
+    掃描 PTT/三大法人，自動新增或暫停科技股交易清單。
+    """
+    if not is_trading_day():
+        logger.info("非交易日，跳過選股發現")
+        return
+    logger.info("=== 開盤前選股發現任務 ===")
+    try:
+        from utils.stock_discovery import run_discovery, print_dynamic_status
+        summary = run_discovery()
+        if summary["added"]:
+            for item in summary["added"]:
+                logger.info(f"  ✅ 新增交易標的: {item['code']} {item['name']} — {item['reason']}")
+        if summary["suspended"]:
+            for item in summary["suspended"]:
+                logger.warning(f"  ⏸️  暫停交易標的: {item['code']} {item['name']} — {item['reason']}")
+        logger.info(
+            f"  目前有效清單: {summary['total_effective']} 支 "
+            f"(新增 {len(summary['added'])}，暫停 {len(summary['suspended'])})"
+        )
+    except Exception as e:
+        logger.error(f"選股發現任務失敗: {e}", exc_info=True)
+
+
 def job_open_scan():
     """09:10 — 登入、掃描全市場、開新倉位。"""
     if not is_trading_day():
@@ -86,7 +114,8 @@ def job_open_scan():
         return
     logger.info("=== 開盤掃描開始 ===")
     try:
-        if not bot.login():
+        # 已在啟動時登入 → 不重複登入，避免覆蓋 SDK 實例
+        if bot.sdk is None and not bot.login():
             logger.error("富邦登入失敗，跳過掃描")
             return
         bot.run_cycle()
@@ -236,10 +265,25 @@ def main():
     else:
         logger.warning("尚無訓練好的模型，建議先執行 run_backtest.py")
 
+    # 實盤模式：啟動時立即登入，不等 09:10 排程
+    if not paper:
+        if bot.login():
+            logger.info("✅ 富邦實盤登入成功（啟動時）")
+        else:
+            logger.error("❌ 富邦實盤登入失敗，監控仍會執行但委託需等 09:10 重新登入")
+
     scheduler = BlockingScheduler(timezone=TZ)
 
     # misfire_grace_time=60: 若 job 超過 60 秒才啟動則直接跳過，避免重啟後補跑過期 job
     GRACE = 60
+
+    # 08:30 — 開盤前選股發現（社群掃描 + 三大法人）
+    scheduler.add_job(
+        job_stock_discovery,
+        CronTrigger(hour=8, minute=30, day_of_week="mon-fri", timezone=TZ),
+        id="stock_discovery", name="開盤前選股發現",
+        max_instances=1, coalesce=True, misfire_grace_time=GRACE,
+    )
 
     # 09:10 — 開盤掃描
     scheduler.add_job(
@@ -294,6 +338,7 @@ def main():
     )
 
     logger.info("排程設定完成:")
+    logger.info("  08:30        → 開盤前選股發現（社群掃描 + 三大法人）")
     logger.info("  09:10        → 開盤掃描選股")
     logger.info("  每15分鐘     → 監控停損/停利 (09:10~13:20)")
     logger.info("  13:30        → 收盤最後掃描")

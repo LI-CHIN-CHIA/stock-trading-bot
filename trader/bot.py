@@ -6,10 +6,12 @@ Runs daily scan, AI prediction, and executes orders via Fubon SDK.
 import json
 import logging
 import os
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
+import pytz
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -29,14 +31,24 @@ from trader.risk import (
     should_take_profit,
 )
 from utils.constants import EMERGING_SYMBOLS, EMERGING_TRADEABLE, OTC_SYMBOLS, STOCK_DB, TRADEABLE
+from utils.stock_discovery import get_effective_tradeable
+from utils.db import get_conn
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_TZ = pytz.timezone("Asia/Taipei")
+
 # DATA_DIR 可由環境變數指定，預設為專案根目錄
 # Docker 部署時設為 /data，讓每個用戶掛載自己的 volume
-DATA_DIR     = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent))
-RETRAIN_LOG  = DATA_DIR / "retrain_history.json"
+DATA_DIR              = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent))
+RETRAIN_LOG           = DATA_DIR / "retrain_history.json"
+MIN_CASH_RESERVE_PCT  = float(os.getenv("MIN_CASH_RESERVE_PCT",  "0.20"))
+DRAWDOWN_BREAKER_PCT  = float(os.getenv("DRAWDOWN_BREAKER_PCT",  "0.15"))
+ENABLE_TA_NORMAL      = os.getenv("ENABLE_TA_FOR_NORMAL", "false").lower() == "true"
+SECTOR_MAX_POSITIONS  = int(os.getenv("SECTOR_MAX_POSITIONS", "2"))
+MAX_DAILY_BUYS        = int(os.getenv("MAX_DAILY_BUYS", "3"))
+MAX_DAILY_SPEND       = float(os.getenv("MAX_DAILY_SPEND", "50000"))
 
 def _state_file(paper: bool) -> Path:
     """紙上交易與實盤使用不同 state 檔，避免互相污染。"""
@@ -63,10 +75,42 @@ class TradingBot:
         self.trade_log: list = []
         # 掛單追蹤: order_no -> {side, code, shares, price, placed_at, retries, reason}
         self.pending_orders: dict = {}
+        # 保護 cash/holdings/trade_log/pending_orders 的可重入鎖（主執行緒 + SDK callback 共用）
+        self._lock = threading.RLock()
         # 紙上交易模式：不送真實委託，模擬成交；使用獨立 state 檔
         self.paper_trading: bool = os.getenv("PAPER_TRADING", "true").lower() == "true"
         self._state_file = _state_file(self.paper_trading)
+        # 實盤資金不足時自動切換紙上交易（僅影響買入，賣出仍走實盤）
+        self._auto_paper = False
+        self._auto_paper_min_cash = float(os.getenv("AUTO_PAPER_MIN_CASH", "3000"))
+        # 當日買入計數與花費金額（跨週期持久化，隔日自動重置）
+        self._daily_buy_date: str = ""
+        self._daily_buy_count: int = 0
+        self._daily_spend: float = 0.0
+        # 市場環境過濾快取（30 分鐘 TTL）
+        self._market_uptrend_cache: bool | None = None
+        self._market_cache_ts: float = 0.0
+        # Portfolio 回撤熔斷：追蹤總資產峰值
+        self._peak_capital: float = float(os.getenv("INITIAL_CAPITAL", "20000"))
         self._load_state()
+
+    # ── Helpers (小工具) ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _days_held(h: dict) -> int:
+        """計算持倉天數，從 entry_date 到今日（含容錯）。"""
+        try:
+            return (date.today() - date.fromisoformat(h["entry_date"])).days
+        except Exception:
+            return h.get("hold_days", 0)
+
+    def _reset_daily_counters_if_needed(self) -> None:
+        """若日期已跨日，重置當日買入計數與花費。"""
+        today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
+        if self._daily_buy_date != today_str:
+            self._daily_buy_date = today_str
+            self._daily_buy_count = 0
+            self._daily_spend = 0.0
 
     # ── SDK Login ─────────────────────────────────────────────────────────────
 
@@ -101,79 +145,87 @@ class TradingBot:
 
     def _on_filled(self, data) -> None:
         """
-        即時成交回調 — 成交瞬間由 SDK 觸發。
-        自動更新持倉與現金，從 pending_orders 移除對應掛單。
+        即時成交回調 — 成交瞬間由 SDK 觸發（SDK callback thread）。
+        用 _lock 確保與主執行緒的狀態更新互斥。
+        先移除 pending_orders 再更新狀態，防止 process_pending_orders 重複結算。
         """
         try:
-            seq_no   = getattr(data, "seq_no", None) or getattr(data, "order_no", None)
-            code     = str(getattr(data, "stock_no", "") or "").strip()
-            side     = getattr(data, "buy_sell", None)
-            filled   = int(getattr(data, "filled_qty", 0) or getattr(data, "quantity", 0) or 0)
-            price    = float(getattr(data, "filled_price", 0) or getattr(data, "price", 0) or 0)
+            seq_no = getattr(data, "seq_no", None) or getattr(data, "order_no", None)
+            code   = str(getattr(data, "stock_no", "") or "").strip()
+            side   = getattr(data, "buy_sell", None)
+            filled = int(getattr(data, "filled_qty", 0) or getattr(data, "quantity", 0) or 0)
+            price  = float(getattr(data, "filled_price", 0) or getattr(data, "price", 0) or 0)
 
             if not code or filled <= 0:
                 return
 
             is_buy = str(side).upper() in ("BUY", "BSACTION.BUY")
 
-            if is_buy:
-                actual_cost = buy_cost(filled, price)
-                self.cash -= actual_cost
-                if code in self.holdings:
-                    # 已有部分成交，累加
-                    h = self.holdings[code]
-                    total_shares = h["shares"] + filled
-                    avg_price = (h["entry_price"] * h["shares"] + price * filled) / total_shares
-                    h["shares"] = total_shares
-                    h["entry_price"] = avg_price
-                    h["cost"] = h["cost"] + actual_cost
+            with self._lock:
+                # 先從 pending_orders 移除，防止 process_pending_orders 重複結算
+                removed = False
+                if seq_no and seq_no in self.pending_orders:
+                    self.pending_orders.pop(seq_no)
+                    removed = True
                 else:
-                    self.holdings[code] = {
-                        "shares": filled,
-                        "entry_price": price,
-                        "entry_date": datetime.now().strftime("%Y-%m-%d"),
-                        "cost": actual_cost,
-                        "buy_proba": 0,
-                    }
-                self.trade_log.append({
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "action": "BUY",
-                    "ticker": code,
-                    "shares": filled,
-                    "price": price,
-                })
-                logger.info(f"🔔 即時成交(BUY): {code} {filled}股 @ {price:.2f} 成本={actual_cost:.0f}")
-            else:
-                proceeds = sell_proceeds(filled, price)
-                self.cash += proceeds
-                if code in self.holdings:
-                    h = self.holdings[code]
-                    remain = h["shares"] - filled
-                    if remain <= 0:
-                        abs_pnl, pct_pnl = pnl(h["entry_price"], price, filled)
-                        self.trade_log.append({
-                            "date": datetime.now().strftime("%Y-%m-%d"),
-                            "action": "SELL",
-                            "ticker": code,
-                            "shares": filled,
-                            "price": price,
-                            "pnl": abs_pnl,
-                            "pnl_pct": pct_pnl,
-                        })
-                        del self.holdings[code]
+                    # seq_no 為 None 或不在 dict 時，按 code+side 找
+                    side_str = "BUY" if is_buy else "SELL"
+                    stale = [k for k, v in self.pending_orders.items()
+                             if v["code"] == code and v["side"] == side_str]
+                    for k in stale:
+                        self.pending_orders.pop(k)
+                    removed = bool(stale)
+
+                if is_buy:
+                    actual_cost = buy_cost(filled, price)
+                    self.cash -= actual_cost
+                    if code in self.holdings:
+                        h = self.holdings[code]
+                        total = h["shares"] + filled
+                        avg   = (h["entry_price"] * h["shares"] + price * filled) / total
+                        h["shares"]      = total
+                        h["entry_price"] = avg
+                        h["cost"]        = h["cost"] + actual_cost
                     else:
-                        h["shares"] = remain
-                logger.info(f"🔔 即時成交(SELL): {code} {filled}股 @ {price:.2f} 收入={proceeds:.0f}")
+                        self.holdings[code] = {
+                            "shares": filled,
+                            "entry_price": price,
+                            "entry_date": datetime.now(_TZ).strftime("%Y-%m-%d"),
+                            "cost": actual_cost,
+                            "buy_proba": 0,
+                            "peak_price": price,
+                        }
+                    self.trade_log.append({
+                        "date":   datetime.now(_TZ).strftime("%Y-%m-%d"),
+                        "action": "BUY",
+                        "ticker": code,
+                        "shares": filled,
+                        "price":  price,
+                    })
+                    logger.info(f"🔔 即時成交(BUY): {code} {filled}股 @ {price:.2f} 成本={actual_cost:.0f}")
+                else:
+                    proceeds = sell_proceeds(filled, price)
+                    self.cash += proceeds
+                    if code in self.holdings:
+                        h = self.holdings[code]
+                        remain = h["shares"] - filled
+                        if remain <= 0:
+                            abs_pnl, pct_pnl = pnl(h["entry_price"], price, filled)
+                            self.trade_log.append({
+                                "date":    datetime.now(_TZ).strftime("%Y-%m-%d"),
+                                "action":  "SELL",
+                                "ticker":  code,
+                                "shares":  filled,
+                                "price":   price,
+                                "pnl":     abs_pnl,
+                                "pnl_pct": pct_pnl,
+                            })
+                            del self.holdings[code]
+                        else:
+                            h["shares"] = remain
+                    logger.info(f"🔔 即時成交(SELL): {code} {filled}股 @ {price:.2f} 收入={proceeds:.0f}")
 
-            # 從 pending_orders 移除對應掛單
-            matched = [no for no, o in self.pending_orders.items()
-                       if o["code"] == code and getattr(no, "__eq__", lambda x: no == x)(seq_no)]
-            if not matched and seq_no:
-                matched = [seq_no] if seq_no in self.pending_orders else []
-            for no in matched:
-                self.pending_orders.pop(no, None)
-
-            self._save_state()
+                self._save_state()
 
         except Exception as e:
             logger.error(f"即時成交回調錯誤: {e}", exc_info=True)
@@ -271,10 +323,24 @@ class TradingBot:
                     logger.warning(
                         f"⚠️  餘額仍有差異 {diff:.0f} 元（扣除未交割後），使用本地記錄"
                     )
-                    # 差異過大時保守地取較小值，避免超買
                     self.cash = min(effective_cash, self.cash)
                 else:
                     self.cash = effective_cash
+
+                # 資金不足時自動切換紙上交易
+                if self.cash < self._auto_paper_min_cash:
+                    if not self._auto_paper:
+                        logger.warning(
+                            f"💸 實盤資金不足 {self.cash:,.0f} 元（門檻 {self._auto_paper_min_cash:,.0f}），"
+                            f"自動切換紙上交易模式"
+                        )
+                    self._auto_paper = True
+                else:
+                    if self._auto_paper:
+                        logger.info(
+                            f"💰 實盤資金恢復 {self.cash:,.0f} 元，回到實盤交易模式"
+                        )
+                    self._auto_paper = False
         except Exception as e:
             logger.warning(f"餘額同步失敗（使用本地記錄）: {e}")
 
@@ -394,7 +460,20 @@ class TradingBot:
         self.process_pending_orders()
 
         for code in list(self.holdings.keys()):
-            h = self.holdings[code]
+            with self._lock:
+                h = self.holdings.get(code)
+            if h is None:
+                continue  # 已被 _on_filled 移除
+            # 跳過已有掛賣單的持倉，避免重複下單
+            with self._lock:
+                has_pending_sell = any(
+                    o.get("side") == "SELL" and o.get("code") == code
+                    for o in self.pending_orders.values()
+                )
+            if has_pending_sell:
+                logger.debug(f"{code} 已有掛賣單，跳過本次監控")
+                continue
+
             price = self._get_latest_price(code)
             if price <= 0:
                 continue
@@ -405,7 +484,8 @@ class TradingBot:
             h["peak_price"] = max(h.get("peak_price", h["entry_price"]), price)
 
             abs_pnl, pct_pnl = pnl(h["entry_price"], price, h["shares"])
-            hold_days = h.get("hold_days", 0)
+            hold_days = self._days_held(h)
+            h["hold_days"] = hold_days
             reason = None
             sell_proba = 0.0
 
@@ -453,22 +533,31 @@ class TradingBot:
 
             if reason:
                 proceeds = self._execute_sell(code, h["shares"], price, reason, proba=sell_proba)
-                if proceeds > 0:
-                    self.cash += proceeds
-                    del self.holdings[code]   # ✅ 移除持倉，避免下次監控重複下單
-                    self.trade_log.append({
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "action": "SELL",
-                        "ticker": code,
-                        "shares": h["shares"],
-                        "price": price,
-                        "pnl": abs_pnl,
-                        "pnl_pct": pct_pnl,
-                        "reason": reason,
-                    })
-                    logger.info(f"賣出 {code}: {reason}, 損益 {abs_pnl:+.0f} 元")
+                if self.paper_trading:
+                    # 紙上交易：立即結算
+                    if proceeds > 0:
+                        with self._lock:
+                            self.cash += proceeds
+                            self.holdings.pop(code, None)
+                            self.trade_log.append({
+                                "date":    datetime.now(_TZ).strftime("%Y-%m-%d"),
+                                "action":  "SELL",
+                                "ticker":  code,
+                                "shares":  h["shares"],
+                                "price":   price,
+                                "pnl":     abs_pnl,
+                                "pnl_pct": pct_pnl,
+                                "reason":  reason,
+                            })
+                        logger.info(f"賣出 {code}: {reason}, 損益 {abs_pnl:+.0f} 元")
+                    else:
+                        logger.warning(f"⚠️  {code} 賣出未成交，繼續持有")
                 else:
-                    logger.warning(f"⚠️  {code} 賣出未成交，繼續持有")
+                    # 實盤：委託已送出（proceeds=0），_on_filled 會處理 cash/holdings
+                    if proceeds == 0.0 and code not in [o.get("code") for o in self.pending_orders.values()]:
+                        logger.warning(f"⚠️  {code} 賣出委託失敗，繼續持有")
+                    else:
+                        logger.info(f"賣出委託送出 {code}: {reason}, 等待成交")
 
     def _get_ta_holding_opinion(
         self, code: str, h: dict, price: float, pct_pnl: float, profile=None
@@ -485,8 +574,27 @@ class TradingBot:
             return None
         if profile is None:
             profile = get_risk_profile(code)
-        # 興櫃信心門檻較低（0.50）；一般股票 0.60
-        sell_confidence_threshold = 0.50 if profile.is_emerging else 0.60
+
+        # ── 最短持有期：一般 2 天，興櫃 1 天 ────────────────────────────────
+        days_held = self._days_held(h)
+
+        min_hold = 1 if profile.is_emerging else 2
+        if days_held < min_hold:
+            logger.info(
+                f"🤖 TA {code}: 持有僅 {days_held} 天（最短 {min_hold} 天），跳過 TA 賣出"
+            )
+            return None
+
+        # ── 持有 < 5 天且損益未達門檻：讓部位繼續發展 ─────────────────────
+        # 損失超過 3% 或獲利超過 5% 才允許 TA 介入
+        if days_held < 5 and abs(pct_pnl) < 0.03:
+            logger.info(
+                f"🤖 TA {code}: 持有 {days_held} 天，損益 {pct_pnl:+.1%} 未達介入門檻（±3%），繼續持有"
+            )
+            return None
+
+        # 興櫃信心門檻 0.65；一般股票提高至 0.75（避免輕微賣出訊號過度交易）
+        sell_confidence_threshold = 0.65 if profile.is_emerging else 0.75
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             ta = get_ta_signal(code, today, mode="holding",
@@ -503,36 +611,120 @@ class TradingBot:
                 logger.info(f"🤖 TA {code}: SELL 信心={ta_conf:.0%} → 賣出")
                 return reason, ta_conf
 
-            hold_days = h.get("hold_days", 0)
             logger.info(
                 f"🤖 TA {code}[{profile.label}]: {ta_sig} 信心={ta_conf:.0%} | "
-                f"持有{hold_days}天 損益{pct_pnl:+.1%} → 繼續持有"
+                f"持有{days_held}天 損益{pct_pnl:+.1%} → 繼續持有"
             )
             return None
         except Exception as e:
             logger.debug(f"_get_ta_holding_opinion {code} 失敗: {e}")
             return None
 
+    def _is_market_uptrend(self) -> bool:
+        """
+        台股加權指數 (^TWII) 收盤 > 20 日均線 → 多頭，允許開倉。
+        結果快取 30 分鐘；無法取得資料時預設允許開倉（保守 fallback）。
+        """
+        CACHE_TTL = 1800
+        if (self._market_uptrend_cache is not None
+                and time.time() - self._market_cache_ts < CACHE_TTL):
+            return self._market_uptrend_cache
+        try:
+            df = yf.Ticker("^TWII").history(period="60d")
+            if len(df) < 21:
+                return True
+            ma20  = df["Close"].rolling(20).mean().iloc[-1]
+            price = df["Close"].iloc[-1]
+            uptrend = bool(price > ma20)
+            self._market_uptrend_cache = uptrend
+            self._market_cache_ts = time.time()
+            tag = "多頭" if uptrend else "空頭"
+            logger.info(f"📊 市場環境: ^TWII {price:,.0f} vs MA20 {ma20:,.0f} → {tag}")
+            return uptrend
+        except Exception as e:
+            logger.warning(f"市場環境判斷失敗（預設允許開倉）: {e}")
+            return True
+
+    def _sector_for(self, code: str) -> str:
+        from utils.constants import SECTOR_MAP
+        for sector, codes in SECTOR_MAP.items():
+            if code in codes:
+                return sector
+        return "其他"
+
+    def _sector_count_in_holdings(self, sector: str) -> int:
+        return sum(1 for c in self.holdings if self._sector_for(c) == sector)
+
     def _scan_and_buy(self):
         if not can_open_position(self.holdings, self.cash, 1):
             return
 
+        # ── 當日買入上限 ──────────────────────────────────────────────────────────
+        self._reset_daily_counters_if_needed()
+        if self._daily_buy_count >= MAX_DAILY_BUYS:
+            logger.info(
+                f"📅 當日買入筆數已達上限 {MAX_DAILY_BUYS} 筆（今日已買 {self._daily_buy_count} 筆），停止掃股"
+            )
+            return
+        if self._daily_spend >= MAX_DAILY_SPEND:
+            logger.info(
+                f"📅 當日買入金額已達上限 {MAX_DAILY_SPEND:,.0f} 元"
+                f"（今日已花 {self._daily_spend:,.0f} 元），停止掃股"
+            )
+            return
+
+        # ── 市場環境過濾 ──────────────────────────────────────────────────────────
+        if not self._is_market_uptrend():
+            logger.info("📊 大盤處於空頭（^TWII < MA20），暫停所有新開倉")
+            return
+
         # 總資產（用於計算每筆上限）
-        holding_value = sum(
-            h["shares"] * self._get_latest_price(c)
-            for c, h in self.holdings.items()
-        )
+        # 若 _get_latest_price 回傳 0（盤前/盤後/資料不可用），以 entry_price 作為保守估算
+        holding_value = 0.0
+        prices_available = True
+        for c, h in self.holdings.items():
+            price = self._get_latest_price(c)
+            if price <= 0:
+                price = h.get("entry_price", 0.0)
+                prices_available = False
+            holding_value += h["shares"] * price
         total_capital = self.cash + holding_value
 
+        # ── 最低現金保留 ───────────────────────────────────────────────────────────
+        min_reserve = total_capital * MIN_CASH_RESERVE_PCT
+        if self.cash <= min_reserve:
+            logger.info(
+                f"💰 現金 {self.cash:,.0f} ≤ 保留門檻 {min_reserve:,.0f} "
+                f"({total_capital:,.0f} × {MIN_CASH_RESERVE_PCT:.0%})，停止買入"
+            )
+            return
+
+        # ── Portfolio 回撤熔斷 ────────────────────────────────────────────────────
+        # 只在價格資料完整時才更新峰值並檢查回撤，避免盤前/盤後價格缺失造成誤觸發
+        if prices_available or not self.holdings:
+            self._peak_capital = max(self._peak_capital, total_capital)
+        if self._peak_capital > 0 and (prices_available or not self.holdings):
+            drawdown = (self._peak_capital - total_capital) / self._peak_capital
+            if drawdown >= DRAWDOWN_BREAKER_PCT:
+                logger.warning(
+                    f"🔴 Portfolio 回撤 {drawdown:.1%} ≥ 熔斷門檻 {DRAWDOWN_BREAKER_PCT:.0%}"
+                    f"（峰值 {self._peak_capital:,.0f} → 現值 {total_capital:,.0f}），暫停新開倉"
+                )
+                return
+
         # 興櫃：13:00 後不新開倉（流動性差，來不及成交）
-        import pytz as _pytz
-        now_tw = datetime.now(_pytz.timezone("Asia/Taipei"))
+        now_tw = datetime.now(_TZ)
         allow_emerging = now_tw.hour < 13
 
+        # 當日已賣出的股票（避免同日買回，Fubon 零股不允許）
+        today = now_tw.strftime("%Y-%m-%d")
+        sold_today = {t["ticker"] for t in self.trade_log if t.get("action") == "SELL" and t.get("date") == today}
+
         # ── 一般股票候選 ───────────────────────────────────────────────────────
+        tradeable = self._get_tradeable_from_db() or get_effective_tradeable()
         candidates = []
-        for code in TRADEABLE:
-            if code in self.holdings or code in EMERGING_TRADEABLE:
+        for code in tradeable:
+            if code in self.holdings or code in EMERGING_TRADEABLE or code in sold_today:
                 continue
             profile = get_risk_profile(code)
             signal = self._get_ai_signal(code)
@@ -546,7 +738,7 @@ class TradingBot:
             current_emerging = sum(1 for c in self.holdings if c in EMERGING_TRADEABLE)
             if current_emerging < 1:
                 for code in EMERGING_TRADEABLE:
-                    if code in self.holdings:
+                    if code in self.holdings or code in sold_today:
                         continue
                     profile = get_risk_profile(code)  # always EMERGING
                     signal = self._get_ai_signal(code)
@@ -565,41 +757,88 @@ class TradingBot:
         candidates.sort(key=lambda x: x[1], reverse=True)
         slots = MAX_POSITIONS - len(self.holdings)
 
+        # ── 一般股票 TA 二次確認（ENABLE_TA_FOR_NORMAL=true 時啟用）────────────
+        if ENABLE_TA_NORMAL:
+            ta_passed: list = []
+            ta_skipped: list[str] = []
+            for item in candidates:
+                if item[4].is_emerging:
+                    ta_passed.append(item)  # 興櫃已在上方做過 TA 確認
+                elif len(ta_passed) < slots and self._ta_confirm_buy(item[0]):
+                    ta_passed.append(item)
+                else:
+                    ta_skipped.append(item[0])
+            if ta_skipped:
+                logger.info(f"🤖 TA 一般股過濾跳過: {', '.join(ta_skipped)}")
+            candidates = ta_passed
+
         for code, buy_proba, price, atr, profile in candidates[:slots]:
             if not can_open_position(self.holdings, self.cash, price, profile):
+                continue
+            # ── 類股分散限制 ──────────────────────────────────────────────────────
+            sector = self._sector_for(code)
+            if self._sector_count_in_holdings(sector) >= SECTOR_MAX_POSITIONS:
+                logger.info(f"⚖️  {code}[{sector}] 類股已達上限 {SECTOR_MAX_POSITIONS} 支，跳過")
                 continue
             shares = position_size(self.cash, price, slots, total_capital, profile)
             if shares < 1:
                 continue
             cost = buy_cost(shares, price)
-            if cost > self.cash:
+            available_cash = self.cash - min_reserve
+            if cost > available_cash:
+                continue
+            # ── 當日花費上限：這筆買入後是否超標 ────────────────────────────────
+            if self._daily_spend + cost > MAX_DAILY_SPEND:
+                logger.info(
+                    f"📅 {code} 成本 {cost:,.0f} 元會超出當日上限 {MAX_DAILY_SPEND:,.0f} 元"
+                    f"（今日已花 {self._daily_spend:,.0f}），跳過"
+                )
                 continue
 
             filled_shares = self._execute_buy(code, shares, price, proba=buy_proba)
-            if filled_shares > 0:
-                actual_cost = buy_cost(filled_shares, price)
-                self.cash -= actual_cost
-                self.holdings[code] = {
-                    "shares": filled_shares,
-                    "entry_price": price,
-                    "entry_date": datetime.now().strftime("%Y-%m-%d"),
-                    "cost": actual_cost,
-                    "buy_proba": buy_proba,
-                    "atr": atr,
-                    "peak_price": price,
-                    "hold_days": 0,
-                }
-                self.trade_log.append({
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "action": "BUY",
-                    "ticker": code,
-                    "shares": filled_shares,
-                    "price": price,
-                    "buy_proba": buy_proba,
-                    "market": "emerging" if profile.is_emerging else "normal",
-                })
-                label = "[興櫃]" if profile.is_emerging else ""
-                logger.info(f"買入{label} {code}: {filled_shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%}")
+            label = "[興櫃]" if profile.is_emerging else ""
+            if self.paper_trading or self._auto_paper:
+                # 紙上交易：立即入帳
+                if filled_shares > 0:
+                    actual_cost = buy_cost(filled_shares, price)
+                    with self._lock:
+                        self.cash -= actual_cost
+                        self.holdings[code] = {
+                            "shares": filled_shares,
+                            "entry_price": price,
+                            "entry_date": datetime.now(_TZ).strftime("%Y-%m-%d"),
+                            "cost": actual_cost,
+                            "buy_proba": buy_proba,
+                            "atr": atr,
+                            "peak_price": price,
+                            "hold_days": 0,
+                        }
+                        self.trade_log.append({
+                            "date":    datetime.now(_TZ).strftime("%Y-%m-%d"),
+                            "action":  "BUY",
+                            "ticker":  code,
+                            "shares":  filled_shares,
+                            "price":   price,
+                            "buy_proba": buy_proba,
+                            "market":  "emerging" if profile.is_emerging else "normal",
+                        })
+                    self._daily_buy_count += 1
+                    self._daily_spend += actual_cost
+                    logger.info(
+                        f"買入{label} {code}: {filled_shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%} "
+                        f"（今日第 {self._daily_buy_count}/{MAX_DAILY_BUYS} 筆，"
+                        f"今日已花 {self._daily_spend:,.0f}/{MAX_DAILY_SPEND:,.0f} 元）"
+                    )
+            else:
+                # 實盤：委託已送出（filled_shares=0），_on_filled 負責入帳
+                # 仍計入當日限制（已送出即視為用掉額度）
+                if code in [o.get("code") for o in self.pending_orders.values()]:
+                    self._daily_buy_count += 1
+                    self._daily_spend += cost
+                    logger.info(
+                        f"買入委託{label} {code}: {shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%} "
+                        f"（今日第 {self._daily_buy_count}/{MAX_DAILY_BUYS} 筆，等待成交）"
+                    )
 
     def _ta_confirm_buy(self, code: str) -> bool:
         """
@@ -630,15 +869,14 @@ class TradingBot:
     def _odd_market_type(self):
         """盤中(09:00~13:30)用 IntradayOdd，盤後(13:40~14:30)用 Odd。"""
         from fubon_neo.constant import MarketType
-        import pytz
-        now = datetime.now(pytz.timezone("Asia/Taipei")).time()
         from datetime import time
+        now = datetime.now(_TZ).time()
         if time(9, 0) <= now <= time(13, 30):
             return MarketType.IntradayOdd
         return MarketType.Odd
 
     @staticmethod
-    def _tick_round(price: float) -> float:
+    def _tick_round(price: float, floor: bool = False) -> float:
         """
         Round price to Taiwan stock exchange tick size:
           < 10:    0.01
@@ -646,7 +884,9 @@ class TradingBot:
           50–100:  0.10
           100–500: 0.50
           ≥ 500:   1.00
+        If floor=True, always round down (used for BUY limit to avoid exceeding exchange limit-up).
         """
+        import math
         if price < 10:
             tick = 0.01
         elif price < 50:
@@ -657,19 +897,22 @@ class TradingBot:
             tick = 0.50
         else:
             tick = 1.00
+        if floor:
+            return round(math.floor(price / tick) * tick, 2)
         return round(round(price / tick) * tick, 2)
 
     def _ai_limit_price(self, code: str, side: str, base_price: float, proba: float = 0.0) -> float:
         """
-        BUY: 使用漲停板價（+9.99%），確保盤中零股撮合成交。
-             零股是逐筆撮合，出漲停板價代表「願意接受任何低於此價的成交」，
-             實際成交價是當下市場賣價，不會真的用漲停板價買進。
+        BUY: 使用接近漲停板價（+9.8%，向下取整），確保盤中零股撮合成交。
+             零股是逐筆撮合，出高限價代表「願意接受任何低於此價的成交」，
+             實際成交價是當下市場賣價，不會真的用限價買進。
+             向下取整避免因當下市價≠昨收而超過交易所漲停板上限。
         SELL: 依 AI 信心決定折讓幅度。
         所有價格均對齊台股最小跳動單位，避免「單價輸入錯誤」。
         """
         if side == "BUY":
-            limit_price = self._tick_round(base_price * 1.0999)
-            logger.info(f"AI限價: {code} BUY base={base_price} proba={proba:.0%} → {limit_price} (漲停板，確保成交)")
+            limit_price = self._tick_round(base_price * 1.098, floor=True)
+            logger.info(f"AI限價: {code} BUY base={base_price} proba={proba:.0%} → {limit_price} (接近漲停，確保成交)")
         else:  # SELL
             offset = 0.99 if proba >= 0.70 else 0.98
             limit_price = self._tick_round(base_price * offset)
@@ -678,9 +921,8 @@ class TradingBot:
 
     def _is_market_open(self) -> bool:
         """盤中零股 09:00~13:30，盤後零股 13:40~14:30，其餘時間不允許下單。"""
-        import pytz
         from datetime import time as dtime
-        now = datetime.now(pytz.timezone("Asia/Taipei")).time()
+        now = datetime.now(_TZ).time()
         return dtime(9, 0) <= now <= dtime(13, 30) or dtime(13, 40) <= now <= dtime(14, 30)
 
     def _place_order(self, code: str, side: str, shares: int, price: float, reason: str = "", proba: float = 0.0) -> str | None:
@@ -690,8 +932,7 @@ class TradingBot:
         非市場時間（09:00~13:30 盤中、13:40~14:30 盤後）不下單。
         """
         if not self._is_market_open():
-            import pytz
-            now_str = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%H:%M")
+            now_str = datetime.now(_TZ).strftime("%H:%M")
             logger.warning(f"⛔ 非市場時間 ({now_str})，不下單: {side} {code}")
             return None
 
@@ -730,44 +971,40 @@ class TradingBot:
 
     def _execute_buy(self, code: str, shares: int, price: float, proba: float = 0.0) -> int:
         """
-        Place buy order. Check immediately; if not filled, add to pending_orders.
-        Returns filled shares if immediately confirmed, 0 otherwise (pending).
-        Paper trading mode: simulate fill immediately at requested price.
+        Place buy order and add to pending_orders. Returns shares for paper mode (immediate),
+        or 0 for real mode (cash/holdings updated by _on_filled callback).
+        Real mode with sdk=None: skip entirely — never simulate real orders.
         """
-        if self.paper_trading:
+        if self.paper_trading or self._auto_paper:
             cost = buy_cost(shares, price)
-            logger.info(f"📄 [紙上交易] 模擬買入 {code}: {shares}股 @ {price:.2f} "
+            tag = "紙上交易" if self.paper_trading else "資金不足→紙上交易"
+            logger.info(f"📄 [{tag}] 模擬買入 {code}: {shares}股 @ {price:.2f} "
                         f"成本={cost:,.0f}元 AI信心={proba:.0%}")
             return shares
         if self.sdk is None or self.account is None:
-            logger.warning("SDK未連線，模擬買入")
-            return shares
+            logger.warning(f"SDK未連線，跳過買入 {code}（實盤不模擬）")
+            return 0
         try:
             order_no = self._place_order(code, "BUY", shares, price, proba=proba)
             if not order_no:
                 return 0
-            time.sleep(10)
-            filled = self._check_filled(code, order_no)
-            if filled > 0:
-                logger.info(f"✅ 立即成交: 買入 {code} {filled}股")
-                return filled
-            # 未立即成交 → 加入追蹤
-            self.pending_orders[order_no] = {
-                "side": "BUY", "code": code, "shares": shares,
-                "price": price, "placed_at": datetime.now().isoformat(),
-                "retries": 0, "reason": "", "proba": proba,
-            }
-            logger.info(f"⏳ {code} 買單掛單中，等待下次確認 (單號={order_no})")
-            return 0
+            with self._lock:
+                self.pending_orders[order_no] = {
+                    "side": "BUY", "code": code, "shares": shares,
+                    "price": price, "placed_at": datetime.now(_TZ).isoformat(),
+                    "retries": 0, "reason": "", "proba": proba,
+                }
+            logger.info(f"⏳ {code} 買單送出，等待 _on_filled 確認 (單號={order_no})")
+            return 0  # cash/holdings 由 _on_filled 更新，不在此處雙重計算
         except Exception as e:
             logger.error(f"下單錯誤: {e}")
             return 0
 
     def _execute_sell(self, code: str, shares: int, price: float, reason: str, proba: float = 0.0) -> float:
         """
-        Place sell order. Check immediately; if not filled, add to pending_orders.
-        Returns net proceeds if immediately confirmed, 0 otherwise (pending).
-        Paper trading mode: simulate fill immediately at requested price.
+        Place sell order and add to pending_orders. Returns proceeds for paper mode (immediate),
+        or 0.0 for real mode (cash/holdings updated by _on_filled callback).
+        Real mode with sdk=None: skip entirely — never simulate real orders.
         """
         if self.paper_trading:
             proceeds = sell_proceeds(shares, price)
@@ -775,25 +1012,20 @@ class TradingBot:
                         f"回收={proceeds:,.0f}元 原因={reason}")
             return proceeds
         if self.sdk is None or self.account is None:
-            logger.warning("SDK未連線，模擬賣出")
-            return sell_proceeds(shares, price)
+            logger.warning(f"SDK未連線，跳過賣出 {code}（實盤不模擬）")
+            return 0.0
         try:
             order_no = self._place_order(code, "SELL", shares, price, reason, proba=proba)
             if not order_no:
                 return 0.0
-            time.sleep(10)
-            filled = self._check_filled(code, order_no)
-            if filled > 0:
-                logger.info(f"✅ 立即成交: 賣出 {code} {filled}股 ({reason})")
-                return sell_proceeds(filled, price)
-            # 未立即成交 → 加入追蹤
-            self.pending_orders[order_no] = {
-                "side": "SELL", "code": code, "shares": shares,
-                "price": price, "placed_at": datetime.now().isoformat(),
-                "retries": 0, "reason": reason, "proba": proba,
-            }
-            logger.info(f"⏳ {code} 賣單掛單中，等待下次確認 (單號={order_no})")
-            return 0.0
+            with self._lock:
+                self.pending_orders[order_no] = {
+                    "side": "SELL", "code": code, "shares": shares,
+                    "price": price, "placed_at": datetime.now(_TZ).isoformat(),
+                    "retries": 0, "reason": reason, "proba": proba,
+                }
+            logger.info(f"⏳ {code} 賣單送出，等待 _on_filled 確認 (單號={order_no})")
+            return 0.0  # cash/holdings 由 _on_filled 更新，不在此處雙重計算
         except Exception as e:
             logger.error(f"賣出錯誤: {e}")
             return 0.0
@@ -810,6 +1042,11 @@ class TradingBot:
         to_remove = []
 
         for order_no, o in list(self.pending_orders.items()):
+            # _on_filled 可能已在回呼執行緒中移除此單 → 跳過，避免雙重入帳
+            with self._lock:
+                if order_no not in self.pending_orders:
+                    continue
+
             code = o["code"]
             placed_at = datetime.fromisoformat(o["placed_at"])
             elapsed_min = (now - placed_at).seconds // 60
@@ -823,31 +1060,36 @@ class TradingBot:
                 continue
 
             if filled > 0:
-                # ── 成交確認 ──────────────────────────────────────────────
-                if o["side"] == "BUY":
-                    actual_cost = buy_cost(filled, o["price"])
-                    self.cash -= actual_cost
-                    self.holdings[code] = {
-                        "shares": filled, "entry_price": o["price"],
-                        "entry_date": now.strftime("%Y-%m-%d"),
-                        "cost": actual_cost, "buy_proba": 0,
-                    }
-                    self.trade_log.append({
-                        "date": now.strftime("%Y-%m-%d"), "action": "BUY",
-                        "ticker": code, "shares": filled, "price": o["price"],
-                    })
-                    logger.info(f"✅ 掛單成交(BUY): {code} {filled}股 @ {o['price']}")
-                else:
-                    proceeds = sell_proceeds(filled, o["price"])
-                    self.cash += proceeds
-                    if code in self.holdings:
-                        del self.holdings[code]
-                    self.trade_log.append({
-                        "date": now.strftime("%Y-%m-%d"), "action": "SELL",
-                        "ticker": code, "shares": filled, "price": o["price"],
-                        "reason": o["reason"],
-                    })
-                    logger.info(f"✅ 掛單成交(SELL): {code} {filled}股 @ {o['price']}")
+                # ── 成交確認（_on_filled 未觸發時的備援路徑）─────────────
+                with self._lock:
+                    # 再次確認 _on_filled 尚未處理此單
+                    if order_no not in self.pending_orders:
+                        logger.info(f"⚡ {code} {order_no} 已由 _on_filled 處理，跳過重複入帳")
+                        continue
+                    if o["side"] == "BUY":
+                        actual_cost = buy_cost(filled, o["price"])
+                        self.cash -= actual_cost
+                        self.holdings[code] = {
+                            "shares": filled, "entry_price": o["price"],
+                            "entry_date": now.strftime("%Y-%m-%d"),
+                            "cost": actual_cost, "buy_proba": 0,
+                        }
+                        self.trade_log.append({
+                            "date": now.strftime("%Y-%m-%d"), "action": "BUY",
+                            "ticker": code, "shares": filled, "price": o["price"],
+                        })
+                        logger.info(f"✅ 掛單成交(BUY): {code} {filled}股 @ {o['price']}")
+                    else:
+                        proceeds = sell_proceeds(filled, o["price"])
+                        self.cash += proceeds
+                        if code in self.holdings:
+                            del self.holdings[code]
+                        self.trade_log.append({
+                            "date": now.strftime("%Y-%m-%d"), "action": "SELL",
+                            "ticker": code, "shares": filled, "price": o["price"],
+                            "reason": o["reason"],
+                        })
+                        logger.info(f"✅ 掛單成交(SELL): {code} {filled}股 @ {o['price']}")
                 to_remove.append(order_no)
 
             elif o["side"] == "BUY" and elapsed_min >= 30:
@@ -1051,6 +1293,24 @@ class TradingBot:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def _get_tradeable_from_db(self) -> set | None:
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT code FROM tradeable_stocks
+                WHERE updated_at > NOW() - INTERVAL '26 hours'
+            """)
+            rows = cur.fetchall()
+            conn.close()
+            if rows:
+                codes = {r[0] for r in rows}
+                logger.debug(f"從 DB 讀取可交易清單：{len(codes)} 支")
+                return codes
+        except Exception as e:
+            logger.debug(f"DB 可交易清單讀取失敗: {e}")
+        return None
+
     def _get_latest_price(self, code: str) -> float:
         try:
             sym = get_symbol(code)
@@ -1064,15 +1324,60 @@ class TradingBot:
 
     def _get_ai_signal(self, code: str) -> dict | None:
         try:
-            sym = get_symbol(code)
-            df = yf.Ticker(sym).history(period="6mo")
-            if len(df) < 70:
-                return None
-            row = prepare_inference_row(df, code=code)
-            if row.empty:
-                return None
+            import pandas as pd
+            row = None
+
+            # ── 優先從 DB cache 讀取特徵（market-data service 預先計算）───────
+            try:
+                conn = get_conn()
+                try:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT features, fetched_at FROM market_cache
+                        WHERE code = %s
+                          AND fetched_at > NOW() - INTERVAL '30 minutes'
+                    """, (code,))
+                    cached = cur.fetchone()
+                    if cached:
+                        import json as _json
+                        feats = _json.loads(cached[0])
+                        row = pd.DataFrame([feats])
+                        logger.debug(f"{code} 使用 DB 快取特徵（{cached[1]}）")
+
+                    # 情緒分數從 sentiment_cache 讀
+                    sentiment_score = 0.0
+                    cur.execute("SELECT score FROM sentiment_cache WHERE code = %s", (code,))
+                    sent_row = cur.fetchone()
+                    if sent_row:
+                        sentiment_score = float(sent_row[0] or 0.0)
+                finally:
+                    conn.close()
+            except Exception as db_err:
+                logger.debug(f"{code} DB 讀取失敗，fallback 至 yfinance: {db_err}")
+
+            # ── Fallback：DB 無快取時直接抓 yfinance ─────────────────────────
+            if row is None:
+                sym = get_symbol(code)
+                df = yf.Ticker(sym).history(period="6mo")
+                if len(df) < 70:
+                    return None
+
+                sentiment_score = 0.0
+                try:
+                    from utils.forum_sentiment import get_forum_sentiment
+                    company = STOCK_DB.get(code, "").split()[0] if code in STOCK_DB else ""
+                    sent = get_forum_sentiment(code, company_name=company, days=5)
+                    sentiment_score = float(sent.get("score", 0.0))
+                except Exception:
+                    pass
+
+                row = prepare_inference_row(df, code=code, sentiment_score=sentiment_score)
+                if row.empty:
+                    return None
+            else:
+                row["sentiment_score"] = sentiment_score
+
             lgbm_signal = self.model.predict(row)
-            # Attach latest ATR so callers can use it for trailing stop
             if "ATR" in row.columns:
                 lgbm_signal["atr"] = float(row["ATR"].iloc[-1])
 
@@ -1083,7 +1388,6 @@ class TradingBot:
                 if ta is not None:
                     combined = combine_signals(lgbm_signal, ta)
                     if combined is not None:
-                        # 保留 atr 欄位（ta_signal 不含）
                         combined.setdefault("atr", lgbm_signal.get("atr", 0.0))
                         return combined
             except Exception as ta_err:
@@ -1138,6 +1442,9 @@ class TradingBot:
             "pending_orders": self.pending_orders,
             "last_retrain": str(last) if last else None,
             "last_emergency_retrain": getattr(self, "_last_emergency_retrain", None),
+            "daily_buy_date": self._daily_buy_date,
+            "daily_buy_count": self._daily_buy_count,
+            "daily_spend": self._daily_spend,
         }
         with open(self._state_file, "w") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, default=str)
@@ -1154,6 +1461,9 @@ class TradingBot:
                 lr = state.get("last_retrain")
                 self._last_retrain = datetime.fromisoformat(lr) if lr else None
                 self._last_emergency_retrain = state.get("last_emergency_retrain")
+                self._daily_buy_date  = state.get("daily_buy_date", "")
+                self._daily_buy_count = int(state.get("daily_buy_count", 0))
+                self._daily_spend     = float(state.get("daily_spend", 0.0))
                 pending_count = len(self.pending_orders)
                 logger.info(f"載入狀態: 現金={self.cash:.0f}, 持倉={list(self.holdings.keys())}, 掛單={pending_count}筆")
             except Exception as e:
