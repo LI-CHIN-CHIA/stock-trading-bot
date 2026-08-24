@@ -1235,14 +1235,22 @@ class TradingBot:
                 if code not in self.holdings:
                     entry_price = cost_map.get(code) or self._get_latest_price(code)
                     source = "實際成本" if code in cost_map else "現價估算"
+                    # 優先從 trade_log 找回原始買入日期與信心，避免 pod 重啟後日期歸零
+                    past_buy = next(
+                        (t for t in reversed(self.trade_log)
+                         if t.get("ticker") == code and t.get("action") == "BUY"),
+                        None,
+                    )
                     self.holdings[code] = {
                         "shares": qty,
                         "entry_price": entry_price,
-                        "entry_date": datetime.now().strftime("%Y-%m-%d"),
+                        "entry_date": past_buy["date"] if past_buy else datetime.now(_TZ).strftime("%Y-%m-%d"),
                         "cost": entry_price * qty,
-                        "buy_proba": 0.5,
+                        "buy_proba": past_buy.get("buy_proba", 0.5) if past_buy else 0.5,
+                        "peak_price": entry_price,
                     }
-                    logger.info(f"📥 新增未追蹤持倉: {code} {qty}股 成本={entry_price:.2f}（{source}）")
+                    src2 = f"trade_log({past_buy['date']})" if past_buy else "今日"
+                    logger.info(f"📥 新增未追蹤持倉: {code} {qty}股 成本={entry_price:.2f}（{source}）買入日={src2}")
                 else:
                     # 更新股數（可能有部分成交）
                     if self.holdings[code]["shares"] != qty:
