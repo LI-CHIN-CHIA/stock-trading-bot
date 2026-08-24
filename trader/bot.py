@@ -32,6 +32,7 @@ from trader.risk import (
 )
 from utils.constants import EMERGING_SYMBOLS, EMERGING_TRADEABLE, OTC_SYMBOLS, STOCK_DB, TRADEABLE
 from utils.stock_discovery import get_effective_tradeable
+from utils.institutional_flow import is_foreign_buying
 from utils.db import get_conn
 
 load_dotenv()
@@ -111,6 +112,88 @@ class TradingBot:
             self._daily_buy_date = today_str
             self._daily_buy_count = 0
             self._daily_spend = 0.0
+
+    def _get_technical_snapshot(self, code: str) -> dict:
+        """
+        取得最新技術指標快照：RSI、close_vs_ma20、volume_ratio。
+        優先從 DB market_cache 讀取（特徵已由 market-data service 預算），
+        fallback 為 yfinance 短線抓取。
+        回傳 {"rsi": float, "close_vs_ma20": float, "volume_ratio": float}
+        """
+        try:
+            conn = get_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT features FROM market_cache
+                    WHERE code = %s
+                      AND fetched_at > NOW() - INTERVAL '60 minutes'
+                """, (code,))
+                row = cur.fetchone()
+            finally:
+                conn.close()
+            if row:
+                import json as _json
+                feats = _json.loads(row[0])
+                return {
+                    "rsi":           float(feats.get("RSI", 50)),
+                    "close_vs_ma20": float(feats.get("close_vs_ma20", 0)),
+                    "volume_ratio":  float(feats.get("Volume_Ratio", 1.0)),
+                }
+        except Exception:
+            pass
+
+        # Fallback: 直接抓 yfinance 30 天資料計算
+        try:
+            sym = get_symbol(code)
+            df = yf.Ticker(sym).history(period="40d")
+            if len(df) < 20:
+                return {}
+            from analysis.indicators import TechnicalIndicators
+            df = TechnicalIndicators.add_all(df)
+            last = df.iloc[-1]
+            ma20 = last.get("MA20", 0)
+            vol5 = df["Volume"].iloc[-5:].mean()
+            return {
+                "rsi":           float(last.get("RSI", 50)),
+                "close_vs_ma20": float((last["Close"] - ma20) / ma20) if ma20 > 0 else 0,
+                "volume_ratio":  float(last["Volume"] / vol5) if vol5 > 0 else 1.0,
+            }
+        except Exception:
+            return {}
+
+    def _entry_quality_ok(self, code: str, snap: dict) -> bool:
+        """
+        進場品質三重確認：
+          1. RSI < 65（非超買）
+          2. 收盤 > MA20（多頭趨勢）
+          3. 成交量 ≥ 5 日均量 × 0.6（非死水）
+          4. 外資今日不賣超（或無三大法人資料 → 放行）
+        任一不符合即回傳 False。
+        """
+        if not snap:
+            return True  # 無資料時不阻擋
+
+        rsi          = snap.get("rsi", 50)
+        close_vs_ma20= snap.get("close_vs_ma20", 0)
+        volume_ratio = snap.get("volume_ratio", 1.0)
+
+        if rsi >= 65:
+            logger.info(f"⚠️  {code} 進場品質: RSI={rsi:.1f} 超買，跳過")
+            return False
+        if close_vs_ma20 < -0.02:   # 收盤低於 MA20 超過 2%
+            logger.info(f"⚠️  {code} 進場品質: 價格低於MA20 {close_vs_ma20:.1%}，跳過")
+            return False
+        if volume_ratio < 0.6:
+            logger.info(f"⚠️  {code} 進場品質: 成交量萎縮 {volume_ratio:.1f}x，跳過")
+            return False
+
+        foreign_ok = is_foreign_buying(code)
+        if foreign_ok is False:
+            logger.info(f"⚠️  {code} 進場品質: 外資今日淨賣超，跳過")
+            return False
+
+        return True
 
     # ── SDK Login ─────────────────────────────────────────────────────────────
 
@@ -722,6 +805,9 @@ class TradingBot:
             if signal and signal.get("signal") == "BUY" and signal.get("buy_proba", 0) >= profile.min_buy_proba:
                 price = self._get_latest_price(code)
                 if price > 0:
+                    snap = self._get_technical_snapshot(code)
+                    if not self._entry_quality_ok(code, snap):
+                        continue
                     candidates.append((code, signal["buy_proba"], price, signal.get("atr", 0.0), profile))
 
         # ── 興櫃候選（需 TA 確認 + 時間限制 + 現有興櫃持倉 < 1）────────────
