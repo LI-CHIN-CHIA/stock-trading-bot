@@ -594,21 +594,27 @@ class TradingBot:
             elif atr <= 0 and should_stop_loss(h["entry_price"], price, profile):
                 reason = f"停損[{profile.label}] {pct_pnl:.1%} (門檻{profile.stop_loss_pct:.0%})"
                 sell_proba = 0.95
-            # ── 3. Take-profit（興櫃：直接出場；一般：Strategy B AI 確認）────
+            # ── 3. 分批停利 ───────────────────────────────────────────────────
             elif should_take_profit(h["entry_price"], price, profile):
-                if not profile.is_emerging:
-                    buy_proba = signal.get("buy_proba", 0) if signal else 0
-                    if signal and signal.get("signal") == "BUY" and buy_proba >= 0.70:
-                        logger.info(
-                            f"📈 {code} 達停利 {pct_pnl:.1%} 但 AI 仍看多 ({buy_proba:.0%})，繼續持有"
-                        )
-                    else:
-                        reason = f"停利 {pct_pnl:.1%}"
-                        sell_proba = 0.80
-                else:
-                    # 興櫃：到達停利直接出場，不等 AI 確認
+                if profile.is_emerging:
+                    # 興櫃：直接全出，不分批
                     reason = f"停利[興櫃] {pct_pnl:.1%} (門檻{profile.take_profit_pct:.0%})"
                     sell_proba = 0.90
+                elif not h.get("partial_exit_done"):
+                    # 第一批：賣一半；AI 強烈看多時跳過
+                    buy_proba = signal.get("buy_proba", 0) if signal else 0
+                    if signal and signal.get("signal") == "BUY" and buy_proba >= 0.75:
+                        logger.info(
+                            f"📈 {code} 達第一批停利 {pct_pnl:.1%} 但 AI 強力看多 ({buy_proba:.0%})，繼續持有"
+                        )
+                    else:
+                        reason = f"部分停利(一半) {pct_pnl:.1%}"
+                        sell_proba = 0.80
+                else:
+                    # 已做過第一批 → 第二批：達 take_profit_pct2 全出
+                    if pct_pnl >= profile.take_profit_pct2:
+                        reason = f"停利(全出) {pct_pnl:.1%} (門檻{profile.take_profit_pct2:.0%})"
+                        sell_proba = 0.85
             # ── 4. 最大持有天數 ───────────────────────────────────────────────
             elif hold_days >= profile.max_hold_days:
                 reason = f"超過持有期[{profile.label}] {hold_days}天 ({pct_pnl:.1%})"
@@ -624,31 +630,48 @@ class TradingBot:
                     reason, sell_proba = ta_opinion
 
             if reason:
-                proceeds = self._execute_sell(code, h["shares"], price, reason, proba=sell_proba)
-                if self.paper_trading:
+                is_partial = "部分停利" in reason
+                sell_shares = (h["shares"] // 2) if is_partial and h["shares"] >= 2 else h["shares"]
+                if sell_shares < 1:
+                    sell_shares = h["shares"]
+                    is_partial = False
+
+                proceeds = self._execute_sell(code, sell_shares, price, reason, proba=sell_proba)
+                if self.paper_trading or self._auto_paper:
                     # 紙上交易：立即結算
                     if proceeds > 0:
+                        part_pnl, part_pct = pnl(h["entry_price"], price, sell_shares)
                         with self._lock:
                             self.cash += proceeds
-                            self.holdings.pop(code, None)
+                            if is_partial:
+                                h["shares"] -= sell_shares
+                                h["partial_exit_done"] = True
+                            else:
+                                self.holdings.pop(code, None)
                             self.trade_log.append({
                                 "date":    datetime.now(_TZ).strftime("%Y-%m-%d"),
                                 "action":  "SELL",
                                 "ticker":  code,
-                                "shares":  h["shares"],
+                                "shares":  sell_shares,
                                 "price":   price,
-                                "pnl":     abs_pnl,
-                                "pnl_pct": pct_pnl,
+                                "pnl":     part_pnl,
+                                "pnl_pct": part_pct,
                                 "reason":  reason,
                             })
-                        logger.info(f"賣出 {code}: {reason}, 損益 {abs_pnl:+.0f} 元")
+                        tag = f"（剩 {h.get('shares', 0)} 股繼續持有）" if is_partial else ""
+                        logger.info(f"賣出 {code}: {reason}{tag}, 損益 {part_pnl:+.0f} 元")
                     else:
                         logger.warning(f"⚠️  {code} 賣出未成交，繼續持有")
                 else:
-                    # 實盤：委託已送出（proceeds=0），_on_filled 會處理 cash/holdings
-                    if proceeds == 0.0 and code not in [o.get("code") for o in self.pending_orders.values()]:
+                    # 實盤：委託已送出（proceeds=0），_on_filled 會處理 shares
+                    pending_codes = [o.get("code") for o in self.pending_orders.values()]
+                    if proceeds == 0.0 and code not in pending_codes:
                         logger.warning(f"⚠️  {code} 賣出委託失敗，繼續持有")
                     else:
+                        if is_partial:
+                            with self._lock:
+                                if code in self.holdings:
+                                    self.holdings[code]["partial_exit_done"] = True
                         logger.info(f"賣出委託送出 {code}: {reason}, 等待成交")
 
     def _get_ta_holding_opinion(
