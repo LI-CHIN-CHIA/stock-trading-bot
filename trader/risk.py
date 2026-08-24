@@ -29,7 +29,8 @@ ATR_MULTIPLIER = 2.0        # ATR trailing stop: stop = peak_price - 2 × ATR
 class RiskProfile:
     """Per-stock risk parameters. Use get_risk_profile(code) to obtain."""
     stop_loss_pct: float       # 固定停損（ATR 不可用時備用）
-    take_profit_pct: float     # 停利門檻
+    take_profit_pct: float     # 停利門檻（第一批）
+    take_profit_pct2: float    # 第二批停利門檻（剩餘半倉）
     atr_multiplier: float      # ATR 追蹤停損倍率
     max_hold_days: int         # 最大持有天數
     max_per_stock_pct: float   # 單支最大佔資金比例
@@ -38,34 +39,42 @@ class RiskProfile:
     ta_ttl_min: int            # 持倉時 TradingAgents 快取時間（分鐘）
     is_emerging: bool          # 是否為興櫃
     label: str                 # 顯示標籤
+    protection_days: int       # 保護期天數：此期間只用固定停損，不啟動 ATR 追蹤
+    protection_stop_pct: float # 保護期固定停損（比 stop_loss_pct 更緊）
 
 
 # 一般上市/上櫃
 NORMAL = RiskProfile(
-    stop_loss_pct    = 0.07,
-    take_profit_pct  = 0.10,
-    atr_multiplier   = 2.0,
-    max_hold_days    = 10,
-    max_per_stock_pct= 0.40,
-    min_buy_proba    = 0.45,
-    require_ta       = False,
-    ta_ttl_min       = 90,
-    is_emerging      = False,
-    label            = "一般",
+    stop_loss_pct       = 0.07,
+    take_profit_pct     = 0.07,   # +7% 先賣一半
+    take_profit_pct2    = 0.15,   # +15% 賣剩餘
+    atr_multiplier      = 2.0,
+    max_hold_days       = 10,
+    max_per_stock_pct   = 0.40,
+    min_buy_proba       = 0.45,
+    require_ta          = False,
+    ta_ttl_min          = 90,
+    is_emerging         = False,
+    label               = "一般",
+    protection_days     = 3,      # 前 3 天只用固定停損保護
+    protection_stop_pct = 0.05,   # 保護期停損 -5%（比正常 -7% 更緊）
 )
 
 # 興櫃高風險
 EMERGING = RiskProfile(
-    stop_loss_pct    = 0.05,   # 更緊停損 -5%（ATR追蹤為主，此為無ATR時備用）
-    take_profit_pct  = 0.15,   # 停利 +15%（給題材行情更多空間，R/R=3x）
-    atr_multiplier   = 1.5,    # ATR 追蹤更緊
-    max_hold_days    = 5,      # 最多持有 5 個交易日
-    max_per_stock_pct= 0.20,   # 最多佔總資金 20%
-    min_buy_proba    = 0.60,   # 買入門檻更高
-    require_ta       = True,   # 必須有 TradingAgents 確認才能買
-    ta_ttl_min       = 30,     # 每 30 分鐘重新詢問 TA
-    is_emerging      = True,
-    label            = "興櫃",
+    stop_loss_pct       = 0.05,
+    take_profit_pct     = 0.10,   # +10% 先賣一半
+    take_profit_pct2    = 0.20,   # +20% 賣剩餘
+    atr_multiplier      = 1.5,
+    max_hold_days       = 5,
+    max_per_stock_pct   = 0.20,
+    min_buy_proba       = 0.60,
+    require_ta          = True,
+    ta_ttl_min          = 30,
+    is_emerging         = True,
+    label               = "興櫃",
+    protection_days     = 1,      # 興櫃保護期 1 天
+    protection_stop_pct = 0.04,   # 保護期停損 -4%
 )
 
 

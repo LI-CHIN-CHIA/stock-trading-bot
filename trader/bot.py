@@ -576,12 +576,21 @@ class TradingBot:
             signal = self._get_ai_signal(code)
             atr = signal.get("atr", 0.0) if signal else h.get("atr", 0.0)
 
-            # ── 1. ATR trailing stop (primary stop mechanism) ─────────────────
-            if should_atr_stop(h["peak_price"], price, atr, profile):
+            in_protection = hold_days < profile.protection_days and pct_pnl < 0.03
+
+            # ── 1. 保護期（前 N 天且未獲利）：只用固定停損，不啟動 ATR ─────────
+            if in_protection:
+                loss_pct = (h["entry_price"] - price) / h["entry_price"]
+                if loss_pct >= profile.protection_stop_pct:
+                    reason = (f"保護期停損[{profile.label}] {pct_pnl:.1%} "
+                              f"(門檻-{profile.protection_stop_pct:.0%}, 持有{hold_days}天)")
+                    sell_proba = 0.95
+            # ── 2. 成長期：ATR 追蹤停損（主要機制）─────────────────────────────
+            elif should_atr_stop(h["peak_price"], price, atr, profile):
                 reason = (f"ATR追蹤停損[{profile.label}] {pct_pnl:.1%} "
                           f"(peak={h['peak_price']:.2f}, atr={atr:.2f}, x{profile.atr_multiplier})")
                 sell_proba = 0.95
-            # ── 2. Fixed stop-loss fallback (when ATR unavailable) ────────────
+            # ── 3. ATR 不可用時的固定停損備援 ────────────────────────────────────
             elif atr <= 0 and should_stop_loss(h["entry_price"], price, profile):
                 reason = f"停損[{profile.label}] {pct_pnl:.1%} (門檻{profile.stop_loss_pct:.0%})"
                 sell_proba = 0.95

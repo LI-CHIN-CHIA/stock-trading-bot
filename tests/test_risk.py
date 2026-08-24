@@ -19,7 +19,10 @@ from trader.risk import (
 class TestRiskProfiles:
     def test_normal_params(self):
         assert NORMAL.stop_loss_pct == 0.07
-        assert NORMAL.take_profit_pct == 0.10
+        assert NORMAL.take_profit_pct == 0.07     # 第一批停利 +7%
+        assert NORMAL.take_profit_pct2 == 0.15    # 第二批停利 +15%
+        assert NORMAL.protection_days == 3
+        assert NORMAL.protection_stop_pct == 0.05
         assert NORMAL.atr_multiplier == 2.0
         assert NORMAL.max_hold_days == 10
         assert NORMAL.max_per_stock_pct == 0.40
@@ -29,7 +32,10 @@ class TestRiskProfiles:
 
     def test_emerging_params(self):
         assert EMERGING.stop_loss_pct == 0.05
-        assert EMERGING.take_profit_pct == 0.15
+        assert EMERGING.take_profit_pct == 0.10   # 第一批停利 +10%
+        assert EMERGING.take_profit_pct2 == 0.20  # 第二批停利 +20%
+        assert EMERGING.protection_days == 1
+        assert EMERGING.protection_stop_pct == 0.04
         assert EMERGING.atr_multiplier == 1.5
         assert EMERGING.max_hold_days == 5
         assert EMERGING.max_per_stock_pct == 0.20
@@ -129,17 +135,17 @@ class TestATRStop:
 
 class TestTakeProfit:
     def test_normal_not_triggered(self):
-        assert not should_take_profit(100, 109, NORMAL)  # +9% < 10%
+        assert not should_take_profit(100, 106, NORMAL)  # +6% < 7%
 
     def test_normal_triggered(self):
-        assert should_take_profit(100, 111, NORMAL)      # +11%
+        assert should_take_profit(100, 108, NORMAL)      # +8% >= 7%
 
     def test_emerging_threshold(self):
-        assert should_take_profit(100, 116, EMERGING)     # +16% >= 15% 觸發
-        assert not should_take_profit(100, 114, EMERGING) # +14% 不觸發
+        assert should_take_profit(100, 111, EMERGING)     # +11% >= 10% 觸發
+        assert not should_take_profit(100, 109, EMERGING) # +9% 不觸發
 
     def test_at_threshold(self):
-        assert should_take_profit(100, 115.0, EMERGING)  # 精確 +15%
+        assert should_take_profit(100, 110.0, EMERGING)  # 精確 +10%
 
 
 # ── 倉位大小 ──────────────────────────────────────────────────────────────────
