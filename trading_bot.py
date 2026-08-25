@@ -227,6 +227,26 @@ def job_daily_summary():
         logger.info("   ⚠️  以上為模擬交易，未產生真實損益")
     logger.info("=" * 55)
 
+    # 自動 commit 績效報告至 git，供 cloud agent 每週分析
+    try:
+        import subprocess as _sp
+        repo_root = Path(__file__).parent
+        # 只 commit 報告檔，不動其他未追蹤的東西
+        _sp.run(["git", "add", str(report_path)], cwd=repo_root, check=True)
+        result = _sp.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=repo_root
+        )
+        if result.returncode != 0:  # 有變更才 commit
+            _sp.run([
+                "git", "commit", "-m",
+                f"perf: 每日績效報告 {today} (總資產={total_value:,.0f}, 損益={realized_pnl:+.0f})"
+            ], cwd=repo_root, check=True)
+            _sp.run(["git", "push"], cwd=repo_root, check=True)
+            logger.info(f"📤 績效報告已推送至 GitHub: {today}")
+    except Exception as e:
+        logger.warning(f"績效報告 git push 失敗（不影響交易）: {e}")
+
 
 def job_retrain(reason: str = "每日排程"):
     """14:35 或條件觸發 — 重新訓練 AI 模型。"""
