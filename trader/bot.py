@@ -495,6 +495,13 @@ class TradingBot:
           3. 連續虧損     — 最近 3 筆都虧損
           4. 市場劇變     — 大盤 (0050) 單日漲跌 > 3%
         """
+        # ── 緊急重訓冷卻：2 小時內不重複觸發 ────────────────────────────────
+        last_emergency_dt = getattr(self, "_last_emergency_retrain_dt", None)
+        if last_emergency_dt is not None:
+            elapsed_hours = (datetime.now(_TZ) - last_emergency_dt).total_seconds() / 3600
+            if elapsed_hours < 2.0:
+                return False, ""
+
         # ── 1. 模型過期 ───────────────────────────────────────────────────────
         last = getattr(self, "_last_retrain", None)
         if last is None:
@@ -1069,10 +1076,19 @@ class TradingBot:
             user_def="AI_BOT",
         )
         result = self.sdk.stock.place_order(self.account, order)
+        relogged = False
+        if not result.is_success and "Not Login" in (result.message or ""):
+            logger.warning("⚠️  SDK Session 過期，嘗試重新登入後再試一次...")
+            if self.login():
+                result = self.sdk.stock.place_order(self.account, order)
+                relogged = True
+            else:
+                logger.error(f"❌ SDK 重新登入失敗，無法下單 {side} {code}")
+                return None
         if result.is_success:
-            # Fubon SDK uses seq_no as the unique order identifier (order_no is always None)
             seq_no = getattr(result.data, "seq_no", None) if result.data else None
-            logger.info(f"委託送出: {side} {code} {shares}股 @ {limit_price} 序號={seq_no}")
+            tag = "(重登後)" if relogged else ""
+            logger.info(f"委託送出{tag}: {side} {code} {shares}股 @ {limit_price} 序號={seq_no}")
             return seq_no
         else:
             logger.error(f"委託失敗: {side} {code} {result.message}")
@@ -1559,6 +1575,7 @@ class TradingBot:
             "pending_orders": self.pending_orders,
             "last_retrain": str(last) if last else None,
             "last_emergency_retrain": getattr(self, "_last_emergency_retrain", None),
+            "last_emergency_retrain_dt": str(getattr(self, "_last_emergency_retrain_dt", None) or ""),
             "daily_buy_date": self._daily_buy_date,
             "daily_buy_count": self._daily_buy_count,
             "daily_spend": self._daily_spend,
@@ -1578,6 +1595,8 @@ class TradingBot:
                 lr = state.get("last_retrain")
                 self._last_retrain = datetime.fromisoformat(lr) if lr else None
                 self._last_emergency_retrain = state.get("last_emergency_retrain")
+                ledt = state.get("last_emergency_retrain_dt", "")
+                self._last_emergency_retrain_dt = datetime.fromisoformat(ledt) if ledt else None
                 self._daily_buy_date  = state.get("daily_buy_date", "")
                 self._daily_buy_count = int(state.get("daily_buy_count", 0))
                 self._daily_spend     = float(state.get("daily_spend", 0.0))

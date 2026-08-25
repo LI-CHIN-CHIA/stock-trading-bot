@@ -256,9 +256,10 @@ def job_retrain(reason: str = "每日排程"):
     logger.info(f"=== 開始重新訓練 AI 模型 (原因: {reason}) ===")
     try:
         bot.retrain(reason=reason)
-        # 記錄緊急重訓日期，避免同日重複觸發
         if reason != "每日排程":
-            bot._last_emergency_retrain = datetime.now(TZ).strftime("%Y-%m-%d")
+            now_tz = datetime.now(TZ)
+            bot._last_emergency_retrain = now_tz.strftime("%Y-%m-%d")
+            bot._last_emergency_retrain_dt = now_tz  # 2小時冷卻用
         logger.info("=== 模型重訓完成 ===")
     except Exception as e:
         logger.error(f"模型重訓失敗: {e}", exc_info=True)
