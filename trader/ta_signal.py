@@ -1,16 +1,17 @@
 """
 TradingAgents 台股整合模組
 ===========================
-使用本地 Ollama (deepseek-r1:32b) 對台股進行多代理人分析，
-作為 LightGBM 模型的第二意見，提高決策品質。
+支援 Ollama（本地）與 FreeToken（OpenAI 相容 API）兩種後端。
 
 環境變數:
-  ENABLE_TRADING_AGENTS=true   啟用（預設 false，避免影響現有流程）
-  TA_DEEP_MODEL=deepseek-r1:32b  深度思考模型（研究員/風控）
-  TA_QUICK_MODEL=qwen2.5:7b      快速模型（分析師/交易員）
-  TA_RESULTS_DIR=./data/ta_results  分析結果儲存目錄
-  TA_HOLDING_TTL_MIN=90        持倉監控快取時間（分鐘），預設90分鐘重新詢問
-  TA_SCAN_TTL_MIN=480          掃股買入快取時間（分鐘），預設480分鐘（同一天不重複掃）
+  ENABLE_TRADING_AGENTS=true   啟用（預設 false）
+  TA_PROVIDER=ollama           LLM 後端：ollama | openai（FreeToken 用 openai）
+  TA_BASE_URL=                 OpenAI 相容端點（FreeToken: http://host:1919/v1）
+  TA_DEEP_MODEL=               深度思考模型
+  TA_QUICK_MODEL=              快速模型
+  TA_RESULTS_DIR=              分析結果目錄
+  TA_HOLDING_TTL_MIN=90        持倉監控快取（分鐘）
+  TA_SCAN_TTL_MIN=480          掃股快取（分鐘）
 """
 
 import logging
@@ -24,12 +25,14 @@ logger = logging.getLogger(__name__)
 
 ENABLE_TA        = os.getenv("ENABLE_TRADING_AGENTS", "false").lower() == "true"
 ENABLE_PTT       = os.getenv("ENABLE_PTT_SENTIMENT", "true").lower() == "true"
+TA_PROVIDER      = os.getenv("TA_PROVIDER", "ollama")   # "ollama" | "openai"（FreeToken）
+TA_BASE_URL      = os.getenv("TA_BASE_URL", "")         # FreeToken: http://localhost:1919/v1
 DEEP_MODEL       = os.getenv("TA_DEEP_MODEL",  "deepseek-r1:32b")
 QUICK_MODEL      = os.getenv("TA_QUICK_MODEL", "qwen2.5:7b")
 RESULTS_DIR      = Path(os.getenv("TA_RESULTS_DIR",
                        Path(__file__).parent.parent / "data" / "ta_results"))
-HOLDING_TTL_MIN  = int(os.getenv("TA_HOLDING_TTL_MIN", "90"))   # 持倉監控快取（分鐘）
-SCAN_TTL_MIN     = int(os.getenv("TA_SCAN_TTL_MIN",    "480"))  # 掃股快取（分鐘）
+HOLDING_TTL_MIN  = int(os.getenv("TA_HOLDING_TTL_MIN", "90"))
+SCAN_TTL_MIN     = int(os.getenv("TA_SCAN_TTL_MIN",    "480"))
 
 # TTL 快取：{ cache_key -> {result: dict, expires_at: datetime} }
 _cache: dict[str, dict] = {}
@@ -42,8 +45,19 @@ def _build_graph():
     from tradingagents.graph.trading_graph import TradingAgentsGraph
     from tradingagents.config import TradingAgentsConfig
 
+    provider = TA_PROVIDER  # "ollama" 或 "openai"（FreeToken）
+
+    # FreeToken / 自訂 OpenAI 相容端點：設定環境變數讓 langchain-openai 自動接收
+    if provider == "openai" and TA_BASE_URL:
+        os.environ.setdefault("OPENAI_API_KEY", "freetoken")
+        os.environ["OPENAI_BASE_URL"] = TA_BASE_URL
+        logger.info(f"TradingAgents 使用 OpenAI 相容後端: {TA_BASE_URL}")
+    elif provider == "ollama":
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        logger.info(f"TradingAgents 使用 Ollama 後端: {ollama_host}")
+
     config = TradingAgentsConfig(
-        llm_provider="ollama",
+        llm_provider=provider,
         deep_think_llm=DEEP_MODEL,
         quick_think_llm=QUICK_MODEL,
         response_language="zh-TW",
@@ -52,7 +66,6 @@ def _build_graph():
         max_recur_limit=50,
         results_dir=RESULTS_DIR,
     )
-    # 只用市場面與新聞面分析，減少 token 消耗與延遲
     graph = TradingAgentsGraph(
         selected_analysts=["market", "news", "fundamentals"],
         config=config,
