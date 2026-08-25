@@ -1,0 +1,22 @@
+FROM nvidia/cuda:12.9.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/models/hf_cache
+ENV TVM_FFI_CUDA_ARCH_LIST=sm_120
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-dev python3-pip git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m pip install --upgrade pip && \
+    pip install "freetoken[accel]"
+
+# 下載 tokenizer/config（不含 weights，weights 從 volume 掛載）
+# RUN python3.12 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-32B-Instruct', ignore_patterns=['*.safetensors'])"
+
+EXPOSE 1919
+
+ENTRYPOINT ["ft", "serve"]
+CMD ["--model-path", "Qwen/Qwen2.5-32B-Instruct", "--port", "1919", "--host", "0.0.0.0"]

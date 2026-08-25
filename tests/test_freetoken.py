@@ -66,6 +66,9 @@ def test_list_models(models_data):
     return models[0]["id"]
 
 
+
+
+
 # ── Test 3: OpenAI Chat Completions API ───────────────────────────────────────
 
 def test_chat_completions(model_id):
@@ -213,6 +216,7 @@ def benchmark(model_id, n=3):
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def main():
+    global FREETOKEN_BASE
     parser = argparse.ArgumentParser(description="FreeToken 整合測試")
     parser.add_argument("--full", action="store_true", help="執行完整 TradingAgents 整合測試")
     parser.add_argument("--base-url", default=FREETOKEN_BASE, help="FreeToken 伺服器 URL")
@@ -220,7 +224,6 @@ def main():
     parser.add_argument("--bench", action="store_true", help="執行效能基準測試")
     args = parser.parse_args()
 
-    global FREETOKEN_BASE
     FREETOKEN_BASE = args.base_url
 
     print("\n" + "="*60)
