@@ -4,8 +4,9 @@
 #   模型預設: Qwen/Qwen2.5-32B-Instruct
 #   port 預設: 1919
 
-MODEL="${1:-Qwen/Qwen2.5-32B-Instruct}"
+MODEL="${1:-Qwen/Qwen2.5-7B-Instruct}"
 PORT="${2:-1919}"
+MEMORY_RATIO="${3:-0.9}"  # 14B 大模型請用 0.05
 
 echo "🚀 啟動 FreeToken..."
 echo "   模型: $MODEL"
@@ -21,4 +22,10 @@ if ! command -v ft &>/dev/null; then
     exit 1
 fi
 
-ft serve --model "$MODEL" --port "$PORT"
+# CUDA 環境（nvcc 12.9 + torch cu130 mismatch override）
+export PATH="/usr/local/cuda-12.9/bin:$PATH"
+export CUDA_HOME=/usr/local/cuda-12.9
+export TVM_FFI_CUDA_ARCH_LIST=12.0
+export FREETOKEN_ALLOW_CUDA_MISMATCH=1
+
+ft serve --model-path "$MODEL" --port "$PORT" --host 0.0.0.0 --memory-ratio "$MEMORY_RATIO"

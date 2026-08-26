@@ -60,7 +60,7 @@ def _build_graph():
         llm_provider=provider,
         deep_think_llm=DEEP_MODEL,
         quick_think_llm=QUICK_MODEL,
-        response_language="zh-TW",
+        response_language="繁體中文（Traditional Chinese）。請務必全程使用繁體中文，嚴禁使用簡體中文。",
         max_debate_rounds=1,
         max_risk_discuss_rounds=1,
         max_recur_limit=50,
