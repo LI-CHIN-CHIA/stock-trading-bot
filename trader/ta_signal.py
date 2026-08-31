@@ -149,6 +149,30 @@ def get_ta_signal(
             "queried_at": now.strftime("%Y-%m-%d %H:%M"),
         }
 
+        # ── PTT 情緒加權（先調整，再存入 cache，避免競態條件）─────────────
+        ptt = None
+        if ENABLE_PTT and mode == "scan":
+            try:
+                from utils.forum_sentiment import get_forum_sentiment
+                from utils.constants import STOCK_DB
+                raw = STOCK_DB.get(code, "")
+                company_name = raw.split()[0] if raw else ""  # "台積電 TSMC" → "台積電"
+                ptt = get_forum_sentiment(code, company_name, days=5)
+                # 情緒與訊號方向一致 → 提升信心；方向相反 → 降低信心
+                if ptt["post_count"] >= 3:
+                    boost = ptt["score"] * 0.1   # 最多 ±10% 調整
+                    if signal == "BUY":
+                        result["confidence"] = max(0.0, min(0.95, result["confidence"] + boost))
+                    elif signal == "SELL":
+                        result["confidence"] = max(0.0, min(0.95, result["confidence"] - boost))
+                    logger.info(
+                        f"PTT 情緒 {code}: {ptt['label']} (分數={ptt['score']:+.2f}, "
+                        f"文章={ptt['post_count']}篇) → 調整信心至 {result['confidence']:.0%}"
+                    )
+                result["ptt_sentiment"] = ptt
+            except Exception as e:
+                logger.debug(f"PTT 情緒整合失敗 ({code}): {e}")
+
         with _cache_lock:
             _cache[cache_key] = {
                 "result": result,
@@ -158,29 +182,6 @@ def get_ta_signal(
             expired_keys = [k for k, v in _cache.items() if now >= v["expires_at"]]
             for k in expired_keys:
                 del _cache[k]
-
-        # ── PTT 情緒加權 ─────────────────────────────────────────────────
-        ptt = None
-        if ENABLE_PTT and mode == "scan":
-            try:
-                from utils.forum_sentiment import get_forum_sentiment
-                from utils.constants import STOCK_DB
-                company_name = STOCK_DB.get(code, {}).get("name", "") if isinstance(STOCK_DB.get(code), dict) else ""
-                ptt = get_forum_sentiment(code, company_name, days=5)
-                # 情緒與訊號方向一致 → 提升信心；方向相反 → 降低信心
-                if ptt["post_count"] >= 3:
-                    boost = ptt["score"] * 0.1   # 最多 ±10% 調整
-                    if signal == "BUY":
-                        result["confidence"] = min(0.95, result["confidence"] + boost)
-                    elif signal == "SELL":
-                        result["confidence"] = min(0.95, result["confidence"] - boost)
-                    logger.info(
-                        f"PTT 情緒 {code}: {ptt['label']} (分數={ptt['score']:+.2f}, "
-                        f"文章={ptt['post_count']}篇) → 調整信心至 {result['confidence']:.0%}"
-                    )
-                result["ptt_sentiment"] = ptt
-            except Exception as e:
-                logger.debug(f"PTT 情緒整合失敗 ({code}): {e}")
 
         # ── 儲存完整溝通紀錄 ─────────────────────────────────────────────
         _save_ta_log(code, date_str, mode, signal, result["confidence"], decision, state, now, ptt)
@@ -253,13 +254,11 @@ def _save_ta_log(
 
 
 def _parse_decision(decision: str) -> str:
-    """從 TradingAgents 完整決策文字中萃取 BUY/SELL/HOLD。"""
+    """從 TradingAgents 完整決策文字中萃取 BUY/SELL/HOLD（取最後出現的關鍵字）。"""
     upper = decision.upper()
-    # 優先抓最後出現的明確關鍵字
-    for keyword in reversed(["BUY", "SELL", "HOLD"]):
-        if keyword in upper:
-            return keyword
-    return "HOLD"
+    positions = {kw: upper.rfind(kw) for kw in ["BUY", "SELL", "HOLD"]}
+    found = {kw: pos for kw, pos in positions.items() if pos >= 0}
+    return max(found, key=found.get) if found else "HOLD"
 
 
 def _confidence_from_decision(decision: str) -> float:

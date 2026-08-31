@@ -46,6 +46,20 @@ DATA_DIR              = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent)
 RETRAIN_LOG           = DATA_DIR / "retrain_history.json"
 MIN_CASH_RESERVE_PCT  = float(os.getenv("MIN_CASH_RESERVE_PCT",  "0.20"))
 DRAWDOWN_BREAKER_PCT  = float(os.getenv("DRAWDOWN_BREAKER_PCT",  "0.15"))
+# 大盤多空排列現金保留比例（積分 3/2/1/0）
+REGIME_CASH = (
+    float(os.getenv("REGIME_CASH_BULL",      "0.20")),  # 3/3 多頭排列
+    float(os.getenv("REGIME_CASH_NEUTRAL_P",  "0.30")),  # 2/3 偏多
+    float(os.getenv("REGIME_CASH_NEUTRAL_N",  "0.45")),  # 1/3 偏空
+    float(os.getenv("REGIME_CASH_BEAR",       "0.60")),  # 0/3 空頭排列
+)
+# 各 regime 買入門檻額外提升（加在 min_buy_proba 上）
+REGIME_BOOST = (
+    float(os.getenv("REGIME_BOOST_BULL",      "0.00")),
+    float(os.getenv("REGIME_BOOST_NEUTRAL_P",  "0.05")),
+    float(os.getenv("REGIME_BOOST_NEUTRAL_N",  "0.07")),
+    float(os.getenv("REGIME_BOOST_BEAR",       "0.10")),
+)
 ENABLE_TA_NORMAL      = os.getenv("ENABLE_TA_FOR_NORMAL", "false").lower() == "true"
 SECTOR_MAX_POSITIONS  = int(os.getenv("SECTOR_MAX_POSITIONS", "2"))
 MAX_DAILY_BUYS        = int(os.getenv("MAX_DAILY_BUYS", "3"))
@@ -89,7 +103,7 @@ class TradingBot:
         self._daily_buy_count: int = 0
         self._daily_spend: float = 0.0
         # 市場環境過濾快取（30 分鐘 TTL）
-        self._market_uptrend_cache: bool | None = None
+        self._market_regime_cache: tuple | None = None  # (regime_str, cash_pct, proba_boost)
         self._market_cache_ts: float = 0.0
         # Portfolio 回撤熔斷：追蹤總資產峰值
         self._peak_capital: float = float(os.getenv("INITIAL_CAPITAL", "20000"))
@@ -221,6 +235,7 @@ class TradingBot:
                 return True
             else:
                 logger.error(f"❌ 富邦登入失敗: {result.message}")
+                self.sdk = None  # 重設為 None，避免後續誤以為已登入
                 return False
         except Exception as e:
             logger.error(f"❌ SDK 錯誤: {e}")
@@ -622,6 +637,13 @@ class TradingBot:
                     if pct_pnl >= profile.take_profit_pct2:
                         reason = f"停利(全出) {pct_pnl:.1%} (門檻{profile.take_profit_pct2:.0%})"
                         sell_proba = 0.85
+                    # 未達第二批停利：仍需檢查持期與 AI 訊號（否則會被外層 elif 短路）
+                    elif hold_days >= profile.max_hold_days:
+                        reason = f"超過持有期[{profile.label}] {hold_days}天 ({pct_pnl:.1%})"
+                        sell_proba = 0.80
+                    elif signal and signal.get("signal") == "SELL" and signal.get("sell_proba", 0) >= 0.55:
+                        sell_proba = signal["sell_proba"]
+                        reason = f"AI賣出 {sell_proba:.0%}"
             # ── 4. 最大持有天數 ───────────────────────────────────────────────
             elif hold_days >= profile.max_hold_days:
                 reason = f"超過持有期[{profile.label}] {hold_days}天 ({pct_pnl:.1%})"
@@ -733,30 +755,71 @@ class TradingBot:
             logger.debug(f"_get_ta_holding_opinion {code} 失敗: {e}")
             return None
 
-    def _is_market_uptrend(self) -> bool:
+    def _get_market_regime(self) -> tuple[str, float, float]:
         """
-        台股加權指數 (^TWII) 收盤 > 20 日均線 → 多頭，允許開倉。
-        結果快取 30 分鐘；無法取得資料時預設允許開倉（保守 fallback）。
+        偵測大盤多空排列，回傳 (regime, cash_reserve_pct, min_proba_boost)。
+
+        台股均線定義：月線=MA20，季線=MA60，年線=MA240（台股年交易日~240）
+        以積分判斷多空排列（各條件 +1 分）：
+          ① 收盤 > MA20（站上月線）
+          ② MA20  > MA60（月線 > 季線）
+          ③ MA60  > MA240（季線 > 年線）
+
+        積分 3 → 多頭排列（bull）   → 現金 20%，+0%
+        積分 2 → 偏多（neutral+）   → 現金 30%，+5%
+        積分 1 → 偏空（neutral-）   → 現金 45%，+7%
+        積分 0 → 空頭排列（bear）   → 現金 60%，+10%
+
+        快取 30 分鐘；資料不可用時預設 bull（保守 fallback）。
         """
         CACHE_TTL = 1800
-        if (self._market_uptrend_cache is not None
+        if (self._market_regime_cache is not None
                 and time.time() - self._market_cache_ts < CACHE_TTL):
-            return self._market_uptrend_cache
+            return self._market_regime_cache
         try:
-            df = yf.Ticker("^TWII").history(period="60d")
-            if len(df) < 21:
-                return True
-            ma20  = df["Close"].rolling(20).mean().iloc[-1]
-            price = df["Close"].iloc[-1]
-            uptrend = bool(price > ma20)
-            self._market_uptrend_cache = uptrend
+            # 需要 240+ 個交易日資料；period="2y" 確保足夠
+            df = yf.Ticker("^TWII").history(period="2y")
+            if len(df) < 241:
+                # 資料不足時保守處理，用偏空設定而非最樂觀的 bull
+                result: tuple[str, float, float] = ("neutral-", REGIME_CASH[2], REGIME_BOOST[2])
+                self._market_regime_cache = result
+                self._market_cache_ts = time.time()
+                return result
+            close  = df["Close"]
+            price  = float(close.iloc[-1])
+            ma20   = float(close.rolling(20).mean().iloc[-1])
+            ma60   = float(close.rolling(60).mean().iloc[-1])
+            ma240  = float(close.rolling(240).mean().iloc[-1])
+
+            score = sum([price > ma20, ma20 > ma60, ma60 > ma240])
+
+            _REGIMES = ["bear", "neutral-", "neutral+", "bull"]
+            regime   = _REGIMES[score]
+            cash_pct = REGIME_CASH[3 - score]
+            boost    = REGIME_BOOST[3 - score]
+
+            LABELS = {
+                "bull":     "多頭排列🐂",
+                "neutral+": "偏多⚖️+",
+                "neutral-": "偏空⚖️-",
+                "bear":     "空頭排列🐻",
+            }
+            logger.info(
+                f"📊 大盤排列（積分 {score}/3）: ^TWII {price:,.0f}"
+                f" | MA20 {ma20:,.0f} | MA60 {ma60:,.0f} | MA240 {ma240:,.0f}"
+                f" → {LABELS[regime]}（現金保留 {cash_pct:.0%}，買入門檻 +{boost:.0%}）"
+            )
+            result = (regime, cash_pct, boost)
+            self._market_regime_cache = result
             self._market_cache_ts = time.time()
-            tag = "多頭" if uptrend else "空頭"
-            logger.info(f"📊 市場環境: ^TWII {price:,.0f} vs MA20 {ma20:,.0f} → {tag}")
-            return uptrend
+            return result
         except Exception as e:
-            logger.warning(f"市場環境判斷失敗（預設允許開倉）: {e}")
-            return True
+            logger.warning(f"市場環境判斷失敗（預設牛市）: {e}")
+            return ("bull", MIN_CASH_RESERVE_PCT, 0.0)
+
+    def _is_market_uptrend(self) -> bool:
+        regime, _, _ = self._get_market_regime()
+        return regime in ("bull", "neutral+")
 
     def _sector_for(self, code: str) -> str:
         from utils.constants import SECTOR_MAP
@@ -786,10 +849,17 @@ class TradingBot:
             )
             return
 
-        # ── 市場環境過濾 ──────────────────────────────────────────────────────────
-        if not self._is_market_uptrend():
-            logger.info("📊 大盤處於空頭（^TWII < MA20），暫停所有新開倉")
-            return
+        # ── 市場環境：動態調整現金保留比例與買入門檻 ────────────────────────────
+        regime, cash_reserve_pct, proba_boost = self._get_market_regime()
+        REGIME_MSG = {
+            "bull":     None,
+            "neutral+": f"⚖️+  大盤偏多（積分 2/3），現金保留 {cash_reserve_pct:.0%}，買入門檻 +5%",
+            "neutral-": f"⚖️-  大盤偏空（積分 1/3），現金保留 {cash_reserve_pct:.0%}，買入門檻 +7%",
+            "bear":     f"🐻  大盤空頭排列（積分 0/3），現金保留 {cash_reserve_pct:.0%}，買入門檻 +10%",
+        }
+        msg = REGIME_MSG.get(regime)
+        if msg:
+            logger.info(msg)
 
         # 總資產（用於計算每筆上限）
         # 若 _get_latest_price 回傳 0（盤前/盤後/資料不可用），以 entry_price 作為保守估算
@@ -803,12 +873,12 @@ class TradingBot:
             holding_value += h["shares"] * price
         total_capital = self.cash + holding_value
 
-        # ── 最低現金保留 ───────────────────────────────────────────────────────────
-        min_reserve = total_capital * MIN_CASH_RESERVE_PCT
+        # ── 最低現金保留（依市場環境動態調整）─────────────────────────────────────
+        min_reserve = total_capital * cash_reserve_pct
         if self.cash <= min_reserve:
             logger.info(
                 f"💰 現金 {self.cash:,.0f} ≤ 保留門檻 {min_reserve:,.0f} "
-                f"({total_capital:,.0f} × {MIN_CASH_RESERVE_PCT:.0%})，停止買入"
+                f"({total_capital:,.0f} × {cash_reserve_pct:.0%} [{regime}])，停止買入"
             )
             return
 
@@ -841,7 +911,8 @@ class TradingBot:
                 continue
             profile = get_risk_profile(code)
             signal = self._get_ai_signal(code)
-            if signal and signal.get("signal") == "BUY" and signal.get("buy_proba", 0) >= profile.min_buy_proba:
+            effective_proba = profile.min_buy_proba + proba_boost
+            if signal and signal.get("signal") == "BUY" and signal.get("buy_proba", 0) >= effective_proba:
                 price = self._get_latest_price(code)
                 if price > 0:
                     snap = self._get_technical_snapshot(code)
@@ -859,7 +930,7 @@ class TradingBot:
                     profile = get_risk_profile(code)  # always EMERGING
                     signal = self._get_ai_signal(code)
                     if not (signal and signal.get("signal") == "BUY"
-                            and signal.get("buy_proba", 0) >= profile.min_buy_proba):
+                            and signal.get("buy_proba", 0) >= profile.min_buy_proba + proba_boost):
                         continue
                     # 興櫃：額外要求 TradingAgents 確認
                     ta_ok = self._ta_confirm_buy(code)
@@ -1163,7 +1234,7 @@ class TradingBot:
         """
         if not self.pending_orders or self.sdk is None:
             return
-        now = datetime.now()
+        now = datetime.now(_TZ)
         to_remove = []
 
         for order_no, o in list(self.pending_orders.items()):
@@ -1579,9 +1650,12 @@ class TradingBot:
             "daily_buy_date": self._daily_buy_date,
             "daily_buy_count": self._daily_buy_count,
             "daily_spend": self._daily_spend,
+            "peak_capital": self._peak_capital,
         }
-        with open(self._state_file, "w") as f:
+        tmp = self._state_file.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp, self._state_file)  # atomic rename，避免 crash 時狀態損壞
 
     def _load_state(self):
         if self._state_file.exists():
@@ -1600,6 +1674,8 @@ class TradingBot:
                 self._daily_buy_date  = state.get("daily_buy_date", "")
                 self._daily_buy_count = int(state.get("daily_buy_count", 0))
                 self._daily_spend     = float(state.get("daily_spend", 0.0))
+                if "peak_capital" in state:
+                    self._peak_capital = float(state["peak_capital"])
                 pending_count = len(self.pending_orders)
                 logger.info(f"載入狀態: 現金={self.cash:.0f}, 持倉={list(self.holdings.keys())}, 掛單={pending_count}筆")
             except Exception as e:
