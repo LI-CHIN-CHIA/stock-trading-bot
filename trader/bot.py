@@ -407,6 +407,9 @@ class TradingBot:
             return  # paper mode 直接使用本地現金記錄
         try:
             result = self.sdk.accounting.bank_remain(self.account)
+            if not result.is_success or not result.data:
+                logger.warning(f"💳 bank_remain 查詢失敗: {getattr(result, 'message', 'no data')}")
+                return
             if result.is_success and result.data:
                 fubon_balance = float(result.data.available_balance)
                 unsettled = self._unsettled_buy_cost()
@@ -421,7 +424,12 @@ class TradingBot:
                     logger.warning(
                         f"⚠️  餘額仍有差異 {diff:.0f} 元（扣除未交割後），使用本地記錄"
                     )
-                    self.cash = min(effective_cash, self.cash)
+                    # 若本地現金幾乎歸零（< 1000），視為狀態重置，以富邦為準
+                    if self.cash < 1000 and effective_cash > self.cash:
+                        logger.info(f"本地現金近零，改以富邦有效餘額 {effective_cash:,.0f} 為準")
+                        self.cash = effective_cash
+                    else:
+                        self.cash = min(effective_cash, self.cash)
                 else:
                     self.cash = effective_cash
 
@@ -1674,7 +1682,7 @@ class TradingBot:
                 self._daily_buy_date  = state.get("daily_buy_date", "")
                 self._daily_buy_count = int(state.get("daily_buy_count", 0))
                 self._daily_spend     = float(state.get("daily_spend", 0.0))
-                if "peak_capital" in state:
+                if state.get("peak_capital") is not None:
                     self._peak_capital = float(state["peak_capital"])
                 pending_count = len(self.pending_orders)
                 logger.info(f"載入狀態: 現金={self.cash:.0f}, 持倉={list(self.holdings.keys())}, 掛單={pending_count}筆")
