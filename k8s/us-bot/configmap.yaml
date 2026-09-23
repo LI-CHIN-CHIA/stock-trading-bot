@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: us-bot-config
+  namespace: trading
+data:
+  DATA_DIR:                  "/data/us"
+  US_INITIAL_CAPITAL:        "10000"
+  US_MAX_POSITIONS:          "5"
+  US_MIN_BUY_PROBA:          "0.60"
+  US_STOP_LOSS_PCT:          "0.07"
+  US_TAKE_PROFIT_PCT:        "0.08"
+  US_TAKE_PROFIT_PCT2:       "0.15"
+  US_MAX_HOLD_DAYS:          "15"
+  US_CASH_RESERVE_PCT:       "0.20"
+  US_DRAWDOWN_BREAKER_PCT:   "0.20"
+  US_MAX_DAILY_BUYS:         "3"
+  US_MAX_PER_STOCK_PCT:      "0.30"
+  MODEL_TYPE:                "lightgbm"

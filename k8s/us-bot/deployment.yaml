@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: us-bot
+  namespace: trading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: us-bot
+  template:
+    metadata:
+      labels:
+        app: us-bot
+    spec:
+      containers:
+      - name: us-bot
+        image: us-bot:latest
+        imagePullPolicy: Never
+        envFrom:
+        - configMapRef:
+            name: us-bot-config
+        volumeMounts:
+        - name: state
+          mountPath: /data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: state
+        persistentVolumeClaim:
+          claimName: trading-state-pvc
+      restartPolicy: Always

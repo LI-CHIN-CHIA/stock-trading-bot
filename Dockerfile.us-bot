@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements-trading-bot.txt .
+COPY wheels/ wheels/
+RUN pip install --no-cache-dir \
+    -r requirements-trading-bot.txt \
+    pandas_market_calendars>=5.3.1.2
+
+COPY ai/        ai/
+COPY analysis/  analysis/
+COPY trader/    trader/
+COPY utils/     utils/
+COPY us_stock_bot.py .
+
+ENV DATA_DIR=/data/us
+VOLUME ["/data"]
+
+CMD ["python", "us_stock_bot.py"]
