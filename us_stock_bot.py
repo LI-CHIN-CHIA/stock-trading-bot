@@ -44,7 +44,7 @@ logger = logging.getLogger("us_bot")
 
 TZ_ET = pytz.timezone("US/Eastern")
 
-from trader.us_bot import USBot
+from trader.us_bot import USBot, MAX_POSITIONS
 bot = USBot()
 
 
@@ -116,7 +116,7 @@ def job_retrain():
 def main():
     logger.info("=" * 55)
     logger.info(f"  US Stock Paper Trading Bot  啟動")
-    logger.info(f"  資金: ${bot.cash:,.0f} USD | 最大持倉: {bot.MAX_POSITIONS if hasattr(bot, 'MAX_POSITIONS') else 5} 支")
+    logger.info(f"  資金: ${bot.cash:,.0f} USD | 最大持倉: {MAX_POSITIONS} 支")
     logger.info("=" * 55)
 
     scheduler = BlockingScheduler(timezone=TZ_ET)
