@@ -123,7 +123,55 @@ def build_feature_matrix(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
                     "institution_buy_streak"]:
             feats[col] = 0.0
 
-    # ── Group 9: 社群情緒（訓練時填 0，推理時由 prepare_inference_row 覆寫）─────
+    # ── Group 9: K 線型態 ─────────────────────────────────────────────────────
+    body_high = df[["Close", "Open"]].max(axis=1)
+    body_low  = df[["Close", "Open"]].min(axis=1)
+    feats["upper_shadow_pct"]  = (df["High"] - body_high) / close.replace(0, np.nan)
+    feats["lower_shadow_pct"]  = (body_low - df["Low"])   / close.replace(0, np.nan)
+    feats["body_direction"]    = np.sign(close - df["Open"])  # 1=陽線, -1=陰線
+    # shadow_ratio: 下影線/上影線 → 值大代表有支撐買壓
+    feats["shadow_ratio"] = feats["lower_shadow_pct"] / (feats["upper_shadow_pct"] + 0.001)
+    # 錘子線：下影線 > 2× 實體，上影線 < 0.5× 實體（底部翻轉訊號）
+    feats["hammer"] = (
+        (feats["lower_shadow_pct"] > 2 * feats["body_pct"]) &
+        (feats["upper_shadow_pct"] < 0.5 * feats["body_pct"])
+    ).astype(float)
+    # 射擊之星：上影線 > 2× 實體，下影線 < 0.5× 實體（頂部反轉訊號）
+    feats["shooting_star"] = (
+        (feats["upper_shadow_pct"] > 2 * feats["body_pct"]) &
+        (feats["lower_shadow_pct"] < 0.5 * feats["body_pct"])
+    ).astype(float)
+    # 多頭吞噬：陽線實體吞掉前一根陰線（看漲）
+    feats["bullish_engulfing"] = (
+        (close > df["Open"]) &
+        (close > df["Open"].shift(1)) &
+        (df["Open"] < close.shift(1)) &
+        (abs(close - df["Open"]) > abs(close.shift(1) - df["Open"].shift(1)))
+    ).astype(float)
+    # 空頭吞噬：陰線實體吞掉前一根陽線（看跌）
+    feats["bearish_engulfing"] = (
+        (close < df["Open"]) &
+        (close < df["Open"].shift(1)) &
+        (df["Open"] > close.shift(1)) &
+        (abs(close - df["Open"]) > abs(close.shift(1) - df["Open"].shift(1)))
+    ).astype(float)
+
+    # ── Group 10: 買賣力道估算 ────────────────────────────────────────────────
+    hl_range = (df["High"] - df["Low"]).replace(0, np.nan)
+    # Williams 法估算：buy_pressure = (C-L)/(H-L)，0=全賣壓，1=全買壓
+    buy_pres  = (close - df["Low"])  / hl_range
+    sell_pres = (df["High"] - close) / hl_range
+    feats["buy_pressure"]  = buy_pres
+    feats["sell_pressure"] = sell_pres
+    # 買賣壓差（正值=買壓大，負值=賣壓大）
+    feats["buy_sell_diff"] = buy_pres - sell_pres
+    # 加權買量佔比（5日均值）
+    buy_vol = vol * buy_pres
+    feats["buy_vol_ratio_ma5"] = (
+        buy_vol.rolling(5).mean() / vol.rolling(5).mean().replace(0, np.nan)
+    )
+
+    # ── Group 11: 社群情緒（訓練時填 0，推理時由 prepare_inference_row 覆寫）────
     feats["sentiment_score"] = 0.0
 
     # Drop warmup rows with NaN (need MA60 + lags + ROC10)
