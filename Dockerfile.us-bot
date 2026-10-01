@@ -5,8 +5,14 @@ WORKDIR /app
 COPY requirements-trading-bot.txt .
 COPY wheels/ wheels/
 RUN pip install --no-cache-dir \
-    -r requirements-trading-bot.txt \
-    pandas_market_calendars>=5.3.1.2
+    -r requirements-trading-bot.txt
+RUN pip install --no-cache-dir --no-index --find-links wheels/ \
+    pandas_market_calendars \
+    exchange_calendars \
+    korean_lunar_calendar \
+    pyluach \
+    toolz \
+    tzdata
 
 COPY ai/        ai/
 COPY analysis/  analysis/

@@ -153,17 +153,19 @@ class USBot:
         if len(df) < 60:
             return None
         try:
-            from analysis.indicators import TechnicalIndicators
-            df = TechnicalIndicators.add_all(df.copy())
+            from ai.features import prepare_inference_row
+            row = prepare_inference_row(df)  # returns last-row feature DataFrame
         except Exception as e:
-            logger.warning(f"指標計算失敗 {ticker}: {e}")
+            logger.warning(f"特徵建立失敗 {ticker}: {e}")
             return None
 
-        result = self.model.predict(df)
+        result = self.model.predict(row)
         if not result.get("trained"):
             return None
 
-        atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not pd.isna(df["ATR"].iloc[-1]) else 0.0
+        from analysis.indicators import TechnicalIndicators
+        df_ind = TechnicalIndicators.add_all(df.copy())
+        atr = float(df_ind["ATR"].iloc[-1]) if "ATR" in df_ind.columns and not pd.isna(df_ind["ATR"].iloc[-1]) else 0.0
         result["atr"] = atr
         return result
 
@@ -190,25 +192,32 @@ class USBot:
     def retrain(self, reason: str = "排程"):
         logger.info(f"=== US Bot 開始重訓 ({reason}) ===")
         try:
-            from analysis.indicators import TechnicalIndicators
-            all_dfs = []
+            from ai.features import build_feature_matrix, build_target
+            all_X, all_y = [], []
             for ticker in US_WATCHLIST:
                 df = self._fetch_data(ticker, period="2y")
                 if len(df) < 80:
                     continue
-                df = TechnicalIndicators.add_all(df.copy())
-                df["ticker"] = ticker
-                all_dfs.append(df)
-            if not all_dfs:
+                try:
+                    X = build_feature_matrix(df)   # code="" → institutional cols = 0
+                    y = build_target(df)
+                    common = X.index.intersection(y.index)
+                    if len(common) >= 60:
+                        all_X.append(X.loc[common])
+                        all_y.append(y.loc[common])
+                except Exception as e:
+                    logger.debug(f"{ticker} 特徵建立失敗: {e}")
+            if not all_X:
                 logger.warning("無資料可訓練")
                 return
-            combined = pd.concat(all_dfs, ignore_index=True)
-            metrics = self.model.train(combined)
+            X_all = pd.concat(all_X)
+            y_all = pd.concat(all_y)
+            metrics = self.model.train(X_all, y_all)
+            self.model.save()
             logger.info(
                 f"US 模型訓練完成  "
                 f"Val F1={metrics.get('val_macro_f1', 0):.3f}  "
-                f"Buy F1={metrics.get('buy_f1', 0):.3f}  "
-                f"勝率={metrics.get('win_rate', 0):.1%}"
+                f"Buy F1={metrics.get('val_buy_f1', 0):.3f}"
             )
         except Exception as e:
             logger.error(f"US 模型重訓失敗: {e}", exc_info=True)
