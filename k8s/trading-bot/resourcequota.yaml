@@ -5,7 +5,7 @@ metadata:
   namespace: trading
 spec:
   hard:
-    limits.memory: 32Gi
-    requests.memory: 32Gi
+    limits.memory: 40Gi
+    requests.memory: 40Gi
     requests.cpu: "20"
     limits.cpu: "20"
