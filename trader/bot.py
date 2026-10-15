@@ -30,7 +30,7 @@ from trader.risk import (
     should_stop_loss,
     should_take_profit,
 )
-from utils.constants import EMERGING_SYMBOLS, EMERGING_TRADEABLE, OTC_SYMBOLS, STOCK_DB, TRADEABLE
+from utils.constants import EMERGING_SYMBOLS, EMERGING_TRADEABLE, ETF_SYMBOLS, OTC_SYMBOLS, STOCK_DB, TRADEABLE
 from utils.stock_discovery import get_effective_tradeable
 from utils.institutional_flow import is_foreign_buying
 from utils.db import get_conn
@@ -178,13 +178,24 @@ class TradingBot:
 
     def _entry_quality_ok(self, code: str, snap: dict) -> bool:
         """
-        進場品質三重確認：
+        進場品質四重確認：
           1. RSI < 65（非超買）
           2. 收盤 > MA20（多頭趨勢）
           3. 成交量 ≥ 5 日均量 × 0.6（非死水）
           4. 外資今日不賣超（或無三大法人資料 → 放行）
+          5. 無即將到來的減資事件（capital_reduction_flag = 0）
         任一不符合即回傳 False。
         """
+        # ── 5. 減資過濾（最優先，不依賴 snap）─────────────────────────────────
+        try:
+            from data.corp_events import get_event_flags
+            ev = get_event_flags(code)
+            if ev.get("capital_reduction_flag"):
+                logger.info(f"⚠️  {code} 進場品質: 近期有減資事件，禁止買入")
+                return False
+        except Exception:
+            pass
+
         if not snap:
             return True  # 無資料時不阻擋
 
@@ -535,8 +546,8 @@ class TradingBot:
                     last = datetime.strptime(ver[:13], "%Y%m%d_%H%M")
                 except ValueError:
                     last = None
-        if last is None or (datetime.now() - last).days >= 7:
-            return True, "模型已超過 7 天未更新"
+        if last is None or (datetime.now() - last).days >= 10:
+            return True, "模型已超過 10 天未更新（週度重訓可能漏跑）"
 
         # ── 2. 績效惡化：近 5 筆勝率 < 40% ──────────────────────────────────
         recent = [t for t in self.trade_log if t.get("action") == "SELL"][-5:]
@@ -608,8 +619,21 @@ class TradingBot:
 
             in_protection = hold_days < profile.protection_days and pct_pnl < 0.03
 
+            # ── 0. 減資特別停損：-15% 固定停損（早於其他條件判斷）──────────────
+            try:
+                from data.corp_events import get_event_flags
+                if get_event_flags(code).get("capital_reduction_flag"):
+                    if pct_pnl <= -0.15:
+                        reason = f"減資保護停損 {pct_pnl:.1%} (-15%上限)"
+                        sell_proba = 0.98
+            except Exception:
+                pass
+
+            if reason:
+                pass  # 落到後面統一執行賣出
+
             # ── 1. 保護期（前 N 天且未獲利）：只用固定停損，不啟動 ATR ─────────
-            if in_protection:
+            elif in_protection:
                 loss_pct = (h["entry_price"] - price) / h["entry_price"]
                 if loss_pct >= profile.protection_stop_pct:
                     reason = (f"保護期停損[{profile.label}] {pct_pnl:.1%} "
@@ -822,8 +846,9 @@ class TradingBot:
             self._market_cache_ts = time.time()
             return result
         except Exception as e:
-            logger.warning(f"市場環境判斷失敗（預設牛市）: {e}")
-            return ("bull", MIN_CASH_RESERVE_PCT, 0.0)
+            logger.warning(f"市場環境判斷失敗（預設偏空保守）: {e}")
+            # 資料無法取得時寧可保守：45% 現金保留、買入門檻 +7%
+            return ("neutral-", REGIME_CASH[2], REGIME_BOOST[2])
 
     def _is_market_uptrend(self) -> bool:
         regime, _, _ = self._get_market_regime()
@@ -837,7 +862,9 @@ class TradingBot:
         return "其他"
 
     def _sector_count_in_holdings(self, sector: str) -> int:
-        return sum(1 for c in self.holdings if self._sector_for(c) == sector)
+        with self._lock:
+            codes = list(self.holdings.keys())
+        return sum(1 for c in codes if self._sector_for(c) == sector)
 
     def _scan_and_buy(self):
         if not can_open_position(self.holdings, self.cash, 1):
@@ -848,12 +875,6 @@ class TradingBot:
         if self._daily_buy_count >= MAX_DAILY_BUYS:
             logger.info(
                 f"📅 當日買入筆數已達上限 {MAX_DAILY_BUYS} 筆（今日已買 {self._daily_buy_count} 筆），停止掃股"
-            )
-            return
-        if self._daily_spend >= MAX_DAILY_SPEND:
-            logger.info(
-                f"📅 當日買入金額已達上限 {MAX_DAILY_SPEND:,.0f} 元"
-                f"（今日已花 {self._daily_spend:,.0f} 元），停止掃股"
             )
             return
 
@@ -871,15 +892,32 @@ class TradingBot:
 
         # 總資產（用於計算每筆上限）
         # 若 _get_latest_price 回傳 0（盤前/盤後/資料不可用），以 entry_price 作為保守估算
+        # 台積電與 ETF 不計入持倉上限（但仍計入總資本）
+        _SPEND_EXCLUDE = {"2330"} | ETF_SYMBOLS
+
         holding_value = 0.0
+        capped_holding_value = 0.0
         prices_available = True
         for c, h in self.holdings.items():
             price = self._get_latest_price(c)
             if price <= 0:
                 price = h.get("entry_price", 0.0)
                 prices_available = False
-            holding_value += h["shares"] * price
+            val = h["shares"] * price
+            holding_value += val
+            if c not in _SPEND_EXCLUDE:
+                capped_holding_value += val
         total_capital = self.cash + holding_value
+
+        # ── 持倉市值上限（台積電/ETF 不計入，其餘持倉 + 當日花費 ≤ MAX_DAILY_SPEND）
+        available_budget = MAX_DAILY_SPEND - capped_holding_value - self._daily_spend
+        if available_budget <= 0:
+            logger.info(
+                f"📊 持倉市值(排除台積電/ETF) {capped_holding_value:,.0f}"
+                f" + 今日已下單 {self._daily_spend:,.0f}"
+                f" ≥ 持倉上限 {MAX_DAILY_SPEND:,.0f}，停止買入"
+            )
+            return
 
         # ── 最低現金保留（依市場環境動態調整）─────────────────────────────────────
         min_reserve = total_capital * cash_reserve_pct
@@ -889,19 +927,6 @@ class TradingBot:
                 f"({total_capital:,.0f} × {cash_reserve_pct:.0%} [{regime}])，停止買入"
             )
             return
-
-        # ── Portfolio 回撤熔斷 ────────────────────────────────────────────────────
-        # 只在價格資料完整時才更新峰值並檢查回撤，避免盤前/盤後價格缺失造成誤觸發
-        if prices_available or not self.holdings:
-            self._peak_capital = max(self._peak_capital, total_capital)
-        if self._peak_capital > 0 and (prices_available or not self.holdings):
-            drawdown = (self._peak_capital - total_capital) / self._peak_capital
-            if drawdown >= DRAWDOWN_BREAKER_PCT:
-                logger.warning(
-                    f"🔴 Portfolio 回撤 {drawdown:.1%} ≥ 熔斷門檻 {DRAWDOWN_BREAKER_PCT:.0%}"
-                    f"（峰值 {self._peak_capital:,.0f} → 現值 {total_capital:,.0f}），暫停新開倉"
-                )
-                return
 
         # 興櫃：13:00 後不新開倉（流動性差，來不及成交）
         now_tw = datetime.now(_TZ)
@@ -975,18 +1000,19 @@ class TradingBot:
             if self._sector_count_in_holdings(sector) >= SECTOR_MAX_POSITIONS:
                 logger.info(f"⚖️  {code}[{sector}] 類股已達上限 {SECTOR_MAX_POSITIONS} 支，跳過")
                 continue
-            shares = position_size(self.cash, price, slots, total_capital, profile)
+            shares = position_size(self.cash, price, slots, MAX_DAILY_SPEND, profile)
             if shares < 1:
                 continue
             cost = buy_cost(shares, price)
             available_cash = self.cash - min_reserve
             if cost > available_cash:
                 continue
-            # ── 當日花費上限：這筆買入後是否超標 ────────────────────────────────
-            if self._daily_spend + cost > MAX_DAILY_SPEND:
+            # ── 持倉上限：買入後（排除台積電/ETF）是否超過上限 ──────────────────
+            if capped_holding_value + self._daily_spend + cost > MAX_DAILY_SPEND:
                 logger.info(
-                    f"📅 {code} 成本 {cost:,.0f} 元會超出當日上限 {MAX_DAILY_SPEND:,.0f} 元"
-                    f"（今日已花 {self._daily_spend:,.0f}），跳過"
+                    f"📊 {code} 成本 {cost:,.0f} 元會超出持倉上限 {MAX_DAILY_SPEND:,.0f} 元"
+                    f"（持倉(排除台積電/ETF) {capped_holding_value:,.0f}"
+                    f" + 今日 {self._daily_spend:,.0f}），跳過"
                 )
                 continue
 
@@ -1022,7 +1048,7 @@ class TradingBot:
                     logger.info(
                         f"買入{label} {code}: {filled_shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%} "
                         f"（今日第 {self._daily_buy_count}/{MAX_DAILY_BUYS} 筆，"
-                        f"今日已花 {self._daily_spend:,.0f}/{MAX_DAILY_SPEND:,.0f} 元）"
+                        f"持倉上限剩餘 {MAX_DAILY_SPEND - capped_holding_value - self._daily_spend:,.0f} 元）"
                     )
             else:
                 # 實盤：委託已送出（filled_shares=0），_on_filled 負責入帳
@@ -1032,7 +1058,8 @@ class TradingBot:
                     self._daily_spend += cost
                     logger.info(
                         f"買入委託{label} {code}: {shares}股 @ {price:.2f}, AI信心 {buy_proba:.0%} "
-                        f"（今日第 {self._daily_buy_count}/{MAX_DAILY_BUYS} 筆，等待成交）"
+                        f"（今日第 {self._daily_buy_count}/{MAX_DAILY_BUYS} 筆，"
+                        f"持倉上限剩餘 {MAX_DAILY_SPEND - capped_holding_value - self._daily_spend:,.0f} 元，等待成交）"
                     )
 
     def _ta_confirm_buy(self, code: str) -> bool:
@@ -1253,7 +1280,7 @@ class TradingBot:
 
             code = o["code"]
             placed_at = datetime.fromisoformat(o["placed_at"])
-            elapsed_min = (now - placed_at).seconds // 60
+            elapsed_min = int((now - placed_at).total_seconds() // 60)
 
             filled = self._check_filled(code, order_no)
 
@@ -1294,6 +1321,8 @@ class TradingBot:
                             "reason": o["reason"],
                         })
                         logger.info(f"✅ 掛單成交(SELL): {code} {filled}股 @ {o['price']}")
+                    # 在鎖內移除，防止 _on_filled 在鎖釋放前重複處理同一筆委託
+                    self.pending_orders.pop(order_no, None)
                 to_remove.append(order_no)
 
             elif o["side"] == "BUY" and elapsed_min >= 30:
