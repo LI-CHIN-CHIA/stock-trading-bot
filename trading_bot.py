@@ -105,13 +105,32 @@ def job_stock_discovery():
 
 
 def job_open_scan():
-    """09:10 — 登入、掃描全市場、開新倉位。"""
+    """09:10 — 夜盤門控 → 登入 → 掃描全市場、開新倉位。"""
     if not is_trading_day():
         logger.info("非交易日，跳過開盤掃描")
         return
     if not within_market_hours():
         logger.warning("開盤掃描: 已超出市場時間，跳過（可能是服務重啟補跑）")
         return
+
+    # ── 夜盤方向門控 ──────────────────────────────────────────────────────
+    _thresh_orig: float | None = None
+    try:
+        from data.night_futures import night_gate_ok
+        import ai.model as _ai_model
+        gate_open, extra_thresh = night_gate_ok()
+        if not gate_open:
+            logger.warning("🚫 夜盤門控關閉，今日跳過開盤買入掃描（持倉監控仍正常運行）")
+            bot._check_holdings()
+            bot._save_state()
+            return
+        if extra_thresh > 0:
+            _thresh_orig = _ai_model.BUY_THRESHOLD
+            _ai_model.BUY_THRESHOLD = min(_thresh_orig + extra_thresh, 0.90)
+            logger.info(f"⚠️  夜盤下跌：買入門檻暫提至 {_ai_model.BUY_THRESHOLD:.2f}（原 {_thresh_orig:.2f}）")
+    except Exception as e:
+        logger.warning(f"夜盤門控判斷失敗（放行）: {e}")
+
     logger.info("=== 開盤掃描開始 ===")
     try:
         # 已在啟動時登入 → 不重複登入，避免覆蓋 SDK 實例
@@ -121,10 +140,18 @@ def job_open_scan():
         bot.run_cycle()
     except Exception as e:
         logger.error(f"開盤掃描失敗: {e}", exc_info=True)
+    finally:
+        # 恢復原始買入門檻（若有暫時調整）
+        if _thresh_orig is not None:
+            try:
+                import ai.model as _ai_model
+                _ai_model.BUY_THRESHOLD = _thresh_orig
+            except Exception:
+                pass
 
 
 def job_monitor():
-    """每15分鐘盤中 — 監控持倉 + 檢查緊急重訓條件。"""
+    """每3分鐘盤中 — 監控持倉 + 檢查緊急重訓條件。"""
     if not is_trading_day() or not within_market_hours():
         return
     logger.info("--- 持倉監控 ---")
@@ -314,23 +341,16 @@ def main():
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
-    # 每15分鐘 09:10~13:25 — 持倉監控
+    # 每3分鐘 09:00~13:30 — 持倉監控
     scheduler.add_job(
         job_monitor,
         CronTrigger(
-            minute="10,25,40,55",
-            hour="9,10,11,12",
+            minute="*/3",
+            hour="9,10,11,12,13",
             day_of_week="mon-fri",
             timezone=TZ,
         ),
         id="monitor", name="持倉監控",
-        max_instances=1, coalesce=True, misfire_grace_time=GRACE,
-    )
-    # 13:00 和 13:20 額外監控
-    scheduler.add_job(
-        job_monitor,
-        CronTrigger(hour=13, minute="0,20", day_of_week="mon-fri", timezone=TZ),
-        id="monitor_close", name="收盤前監控",
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
@@ -350,20 +370,20 @@ def main():
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
-    # 14:35 — 重新訓練
+    # 14:35 週一 — 週度走步重訓（每週一次，使用最近 2 年資料）
     scheduler.add_job(
         job_retrain,
-        CronTrigger(hour=14, minute=35, day_of_week="mon-fri", timezone=TZ),
-        id="retrain", name="AI重訓",
+        CronTrigger(hour=14, minute=35, day_of_week="mon", timezone=TZ),
+        id="retrain", name="AI週度重訓",
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
     logger.info("排程設定完成:")
     logger.info("  08:30        → 開盤前選股發現（社群掃描 + 三大法人）")
     logger.info("  09:10        → 開盤掃描選股")
-    logger.info("  每15分鐘     → 監控停損/停利 (09:10~13:20)")
+    logger.info("  每3分鐘      → 監控停損/停利 (09:00~13:30)")
     logger.info("  13:30        → 收盤最後掃描")
-    logger.info("  14:35        → AI 模型重新訓練")
+    logger.info("  14:35 (週一) → AI 週度重訓（walk-forward）")
     logger.info("按 Ctrl+C 停止")
 
     try:
