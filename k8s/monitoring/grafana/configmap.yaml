@@ -41,293 +41,105 @@ data:
   trading.json: |
     {
       "title": "Trading Bot",
-      "uid": "trading-bot-v2",
+      "uid": "trading-bot-v3",
       "schemaVersion": 38,
       "refresh": "30s",
       "time": {"from": "now-6h", "to": "now"},
       "timezone": "Asia/Taipei",
       "panels": [
         {
-          "id": 1,
-          "gridPos": {"h": 4, "w": 5, "x": 0, "y": 0},
-          "type": "stat",
-          "title": "💰 現金 (Live)",
-          "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none",
-            "textMode": "auto"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "red", "value": null},
-                  {"color": "yellow", "value": 10000},
-                  {"color": "green", "value": 30000}
-                ]
-              },
-              "mappings": []
-            }
-          },
+          "id": 1, "gridPos": {"h": 4, "w": 5, "x": 0, "y": 0},
+          "type": "stat", "title": "💰 現金 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "red", "value": null}, {"color": "yellow", "value": 10000}, {"color": "green", "value": 30000}]}}},
+          "targets": [{"datasource": "Prometheus", "expr": "trading_cash_twd{mode=\"live\"}", "instant": true, "legendFormat": "現金 TWD"}]
+        },
+        {
+          "id": 2, "gridPos": {"h": 4, "w": 5, "x": 5, "y": 0},
+          "type": "stat", "title": "📈 持倉市值 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"datasource": "Prometheus", "expr": "trading_holding_value_twd{mode=\"live\"}", "instant": true, "legendFormat": "持倉市值"}]
+        },
+        {
+          "id": 3, "gridPos": {"h": 4, "w": 5, "x": 10, "y": 0},
+          "type": "stat", "title": "💎 總資產 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "red", "value": null}, {"color": "green", "value": 50000}]}}},
+          "targets": [{"datasource": "Prometheus", "expr": "trading_total_value_twd{mode=\"live\"}", "instant": true, "legendFormat": "總資產"}]
+        },
+        {
+          "id": 4, "gridPos": {"h": 4, "w": 4, "x": 15, "y": 0},
+          "type": "stat", "title": "📊 持倉支數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "orange"}}},
+          "targets": [{"datasource": "Prometheus", "expr": "trading_position_count{mode=\"live\"}", "instant": true, "legendFormat": "持倉數"}]
+        },
+        {
+          "id": 5, "gridPos": {"h": 4, "w": 5, "x": 19, "y": 0},
+          "type": "stat", "title": "📋 總交易次數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "trading_total_buy_trades{mode=\"live\"} + trading_total_sell_trades{mode=\"live\"}",
+            "instant": true, "legendFormat": "總交易"}]
+        },
+        {
+          "id": 10, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "type": "timeseries", "title": "總資產走勢",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
           "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_cash_twd{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "現金 TWD"
-            }
+            {"datasource": "Prometheus", "expr": "trading_total_value_twd{mode=\"live\"}", "legendFormat": "Live 總資產"},
+            {"datasource": "Prometheus", "expr": "trading_total_value_twd{mode=\"paper\"}", "legendFormat": "Paper 總資產"}
           ]
         },
         {
-          "id": 2,
-          "gridPos": {"h": 4, "w": 5, "x": 5, "y": 0},
-          "type": "stat",
-          "title": "📈 持倉市值 (Live)",
-          "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "color": {"mode": "fixed", "fixedColor": "blue"},
-              "mappings": []
-            }
-          },
+          "id": 11, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "type": "timeseries", "title": "現金 vs 持倉市值",
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2}}},
           "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_holding_value_twd{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "持倉市值"
-            }
+            {"datasource": "Prometheus", "expr": "trading_cash_twd{mode=\"live\"}", "legendFormat": "現金"},
+            {"datasource": "Prometheus", "expr": "trading_holding_value_twd{mode=\"live\"}", "legendFormat": "持倉市值"}
           ]
         },
         {
-          "id": 3,
-          "gridPos": {"h": 4, "w": 5, "x": 10, "y": 0},
-          "type": "stat",
-          "title": "💎 總資產 (Live)",
-          "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "background",
-            "graphMode": "none"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "red", "value": null},
-                  {"color": "green", "value": 50000}
-                ]
-              },
-              "mappings": []
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_total_value_twd{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "總資產"
-            }
-          ]
-        },
-        {
-          "id": 4,
-          "gridPos": {"h": 4, "w": 4, "x": 15, "y": 0},
-          "type": "stat",
-          "title": "📊 持倉支數",
-          "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "color": {"mode": "fixed", "fixedColor": "orange"},
-              "mappings": []
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_count{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "持倉數"
-            }
-          ]
-        },
-        {
-          "id": 5,
-          "gridPos": {"h": 4, "w": 5, "x": 19, "y": 0},
-          "type": "stat",
-          "title": "📋 總交易次數",
-          "options": {
-            "reduceOptions": {"calcs": ["lastNotNull"]},
-            "colorMode": "value",
-            "graphMode": "none"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "mappings": []
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_total_buy_trades{mode=\"live\"} + trading_total_sell_trades{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "總交易"
-            }
-          ]
-        },
-        {
-          "id": 10,
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-          "type": "timeseries",
-          "title": "總資產走勢",
-          "options": {
-            "tooltip": {"mode": "single"},
-            "legend": {"displayMode": "list", "placement": "bottom"}
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "custom": {"lineWidth": 2, "fillOpacity": 10}
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_total_value_twd{mode=\"live\"}",
-              "legendFormat": "Live 總資產"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_total_value_twd{mode=\"paper\"}",
-              "legendFormat": "Paper 總資產"
-            }
-          ]
-        },
-        {
-          "id": 11,
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
-          "type": "timeseries",
-          "title": "現金 vs 持倉市值",
-          "options": {
-            "tooltip": {"mode": "multi"},
-            "legend": {"displayMode": "list", "placement": "bottom"}
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "custom": {"lineWidth": 2}
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_cash_twd{mode=\"live\"}",
-              "legendFormat": "現金"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_holding_value_twd{mode=\"live\"}",
-              "legendFormat": "持倉市值"
-            }
-          ]
-        },
-        {
-          "id": 20,
-          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
-          "type": "table",
-          "title": "目前持倉明細 (Live)",
-          "options": {
-            "showHeader": true,
-            "sortBy": [{"displayName": "未實現損益", "desc": true}]
-          },
+          "id": 20, "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+          "type": "table", "title": "目前持倉明細 (Live)",
+          "options": {"showHeader": true},
           "fieldConfig": {
             "defaults": {"decimals": 0},
             "overrides": [
-              {
-                "matcher": {"id": "byName", "options": "未實現損益"},
-                "properties": [
-                  {"id": "custom.displayMode", "value": "color-background"},
-                  {"id": "thresholds", "value": {
-                    "mode": "absolute",
-                    "steps": [{"color": "red","value": null}, {"color": "green","value": 0}]
-                  }},
-                  {"id": "custom.thresholdsStyle", "value": {"mode": "background"}}
-                ]
-              }
+              {"matcher": {"id": "byName", "options": "未實現損益"},
+               "properties": [
+                 {"id": "custom.displayMode", "value": "color-background"},
+                 {"id": "thresholds", "value": {"mode": "absolute",
+                   "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}
+               ]}
             ]
           },
           "transformations": [
             {"id": "merge", "options": {}},
-            {
-              "id": "organize",
-              "options": {
-                "renameByName": {
-                  "Value #A": "股數",
-                  "Value #B": "成本價",
-                  "Value #C": "總成本",
-                  "Value #D": "未實現損益",
-                  "Value #E": "持有天數",
-                  "ticker": "股票代號"
-                }
-              }
-            }
+            {"id": "organize", "options": {
+              "renameByName": {
+                "Value #A": "股數", "Value #B": "成本價",
+                "Value #C": "總成本", "Value #D": "未實現損益",
+                "Value #E": "持有天數", "ticker": "股票代號"
+              },
+              "excludeByName": {"Time": true, "instance": true, "job": true, "mode": true, "__name__": true}
+            }}
           ],
           "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_shares{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "A"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_entry_price{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "B"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_cost{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "C"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_unrealized_pnl{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "D"
-            },
-            {
-              "datasource": "Prometheus",
-              "expr": "trading_position_hold_days{mode=\"live\"}",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "E"
-            }
+            {"datasource": "Prometheus", "expr": "trading_position_shares{mode=\"live\"}", "instant": true, "refId": "A", "legendFormat": ""},
+            {"datasource": "Prometheus", "expr": "trading_position_entry_price{mode=\"live\"}", "instant": true, "refId": "B", "legendFormat": ""},
+            {"datasource": "Prometheus", "expr": "trading_position_cost{mode=\"live\"}", "instant": true, "refId": "C", "legendFormat": ""},
+            {"datasource": "Prometheus", "expr": "trading_position_unrealized_pnl{mode=\"live\"}", "instant": true, "refId": "D", "legendFormat": ""},
+            {"datasource": "Prometheus", "expr": "trading_position_hold_days{mode=\"live\"}", "instant": true, "refId": "E", "legendFormat": ""}
           ]
         }
       ]
@@ -342,192 +154,297 @@ data:
   infra.json: |
     {
       "title": "K8s Infrastructure",
-      "uid": "k8s-infra-v2",
+      "uid": "k8s-infra-v3",
       "schemaVersion": 38,
       "refresh": "30s",
       "time": {"from": "now-1h", "to": "now"},
       "timezone": "Asia/Taipei",
       "panels": [
         {
-          "id": 1,
-          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-          "type": "gauge",
-          "title": "Node CPU 使用率",
-          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "minVizWidth": 75},
+          "id": 1, "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+          "type": "bargauge",
+          "title": "CPU 使用核心數 (已用 / 共24核)",
+          "description": "node-exporter 實際量測，每2秒平均",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "minVizHeight": 10,
+            "namePlacement": "auto",
+            "valueMode": "color"
+          },
           "fieldConfig": {
             "defaults": {
-              "unit": "percent",
-              "decimals": 1,
-              "min": 0, "max": 100,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "green", "value": null},
-                  {"color": "yellow", "value": 70},
-                  {"color": "red", "value": 90}
-                ]
-              }
+              "unit": "short",
+              "decimals": 2,
+              "min": 0,
+              "max": 24,
+              "displayName": "CPU 核心",
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 16},
+                {"color": "red", "value": 20}
+              ]},
+              "color": {"mode": "thresholds"}
             }
           },
           "targets": [
             {
               "datasource": "Prometheus",
-              "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[2m])) * 100)",
+              "expr": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[2m]))) * 24",
               "instant": true,
-              "legendFormat": "CPU %"
+              "legendFormat": "已用核心數"
             }
           ]
         },
         {
-          "id": 2,
-          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
-          "type": "gauge",
-          "title": "Node RAM 使用率",
-          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "minVizWidth": 75},
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percent",
-              "decimals": 1,
-              "min": 0, "max": 100,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "green", "value": null},
-                  {"color": "yellow", "value": 75},
-                  {"color": "red", "value": 90}
-                ]
-              }
-            }
+          "id": 2, "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+          "type": "bargauge",
+          "title": "RAM 使用量 (已用 / 共62GB)",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "color"
           },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
-              "instant": true,
-              "legendFormat": "RAM %"
-            }
-          ]
-        },
-        {
-          "id": 3,
-          "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
-          "type": "stat",
-          "title": "RAM 可用",
-          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
           "fieldConfig": {
             "defaults": {
               "unit": "bytes",
               "decimals": 1,
-              "color": {"mode": "fixed", "fixedColor": "blue"},
-              "mappings": []
+              "min": 0,
+              "max": 66546704384,
+              "displayName": "RAM",
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 49910028288},
+                {"color": "red", "value": 59892033946}
+              ]},
+              "color": {"mode": "thresholds"}
             }
           },
           "targets": [
             {
               "datasource": "Prometheus",
-              "expr": "node_memory_MemAvailable_bytes",
+              "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
               "instant": true,
-              "legendFormat": "可用 RAM"
+              "legendFormat": "已用 RAM"
             }
           ]
         },
         {
-          "id": 4,
-          "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
-          "type": "stat",
-          "title": "Running Pods",
-          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "decimals": 0,
-              "color": {"mode": "fixed", "fixedColor": "green"},
-              "mappings": []
-            }
+          "id": 3, "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+          "type": "bargauge",
+          "title": "磁碟使用量 (已用 / 共1.87TB)",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "color"
           },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "count(kube_pod_status_phase{phase=\"Running\"} == 1)",
-              "instant": true,
-              "legendFormat": "Running Pods"
-            }
-          ]
-        },
-        {
-          "id": 10,
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-          "type": "timeseries",
-          "title": "Pod CPU (trading namespace) — millicores",
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "custom": {"lineWidth": 1}
-            }
-          },
-          "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "sum by(pod)(rate(container_cpu_usage_seconds_total{namespace=\"trading\",container!=\"\",container!=\"POD\"}[2m])) * 1000",
-              "legendFormat": "{{pod}}"
-            }
-          ]
-        },
-        {
-          "id": 11,
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
-          "type": "timeseries",
-          "title": "Pod Memory (trading namespace)",
           "fieldConfig": {
             "defaults": {
               "unit": "bytes",
-              "custom": {"lineWidth": 1}
+              "decimals": 1,
+              "min": 0,
+              "max": 2013991550976,
+              "displayName": "Disk /",
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1409794085683},
+                {"color": "red", "value": 1812592395878}
+              ]},
+              "color": {"mode": "thresholds"}
             }
           },
           "targets": [
             {
               "datasource": "Prometheus",
-              "expr": "container_memory_working_set_bytes{namespace=\"trading\",container!=\"\",container!=\"POD\"}",
-              "legendFormat": "{{pod}}"
+              "expr": "node_filesystem_size_bytes{mountpoint=\"/\"} - node_filesystem_avail_bytes{mountpoint=\"/\"}",
+              "instant": true,
+              "legendFormat": "已用磁碟"
             }
           ]
         },
         {
-          "id": 20,
-          "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+          "id": 4, "gridPos": {"h": 3, "w": 4, "x": 0, "y": 5},
+          "type": "stat", "title": "CPU 使用率 %",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 70}, {"color": "red","value": 90}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[2m]))) * 100",
+            "instant": true, "legendFormat": "CPU %"}]
+        },
+        {
+          "id": 5, "gridPos": {"h": 3, "w": 4, "x": 4, "y": 5},
+          "type": "stat", "title": "RAM 使用率 %",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 75}, {"color": "red","value": 90}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+            "instant": true, "legendFormat": "RAM %"}]
+        },
+        {
+          "id": 6, "gridPos": {"h": 3, "w": 4, "x": 8, "y": 5},
+          "type": "stat", "title": "磁碟使用率 %",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 70}, {"color": "red","value": 90}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "(1 - node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100",
+            "instant": true, "legendFormat": "Disk %"}]
+        },
+        {
+          "id": 7, "gridPos": {"h": 3, "w": 4, "x": 12, "y": 5},
+          "type": "stat", "title": "Running Pods",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "green"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "count(kube_pod_status_phase{phase=\"Running\"} == 1)",
+            "instant": true, "legendFormat": "Running"}]
+        },
+        {
+          "id": 8, "gridPos": {"h": 3, "w": 4, "x": 16, "y": 5},
+          "type": "stat", "title": "磁碟剩餘",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "bytes", "decimals": 1,
+            "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "node_filesystem_avail_bytes{mountpoint=\"/\"}",
+            "instant": true, "legendFormat": "剩餘"}]
+        },
+        {
+          "id": 9, "gridPos": {"h": 3, "w": 4, "x": 20, "y": 5},
+          "type": "stat", "title": "RAM 剩餘",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "bytes", "decimals": 1,
+            "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "node_memory_MemAvailable_bytes",
+            "instant": true, "legendFormat": "剩餘"}]
+        },
+        {
+          "id": 10, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "type": "timeseries", "title": "CPU 使用率走勢 (%)",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "percent", "custom": {"lineWidth": 2, "fillOpacity": 15},
+            "min": 0, "max": 100}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[2m]))) * 100",
+            "legendFormat": "CPU %"}]
+        },
+        {
+          "id": 11, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "type": "timeseries", "title": "RAM 使用走勢",
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"lineWidth": 2, "fillOpacity": 15}}},
+          "targets": [
+            {"datasource": "Prometheus",
+              "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+              "legendFormat": "已用 RAM"},
+            {"datasource": "Prometheus",
+              "expr": "node_memory_MemTotal_bytes",
+              "legendFormat": "總 RAM"}
+          ]
+        },
+        {
+          "id": 20, "gridPos": {"h": 10, "w": 24, "x": 0, "y": 16},
           "type": "table",
-          "title": "所有 Pod 狀態",
-          "options": {"showHeader": true},
-          "fieldConfig": {"defaults": {"decimals": 0}},
+          "title": "Pod 資源配置 (Request / Limit)  ─  注意: k3s 無 cAdvisor，顯示 Kubernetes 設定值",
+          "options": {"showHeader": true, "sortBy": [{"displayName": "Namespace"}]},
+          "fieldConfig": {
+            "defaults": {"decimals": 2},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "CPU Request (cores)"},
+               "properties": [{"id": "custom.width", "value": 140}]},
+              {"matcher": {"id": "byName", "options": "CPU Limit (cores)"},
+               "properties": [{"id": "custom.width", "value": 140}]},
+              {"matcher": {"id": "byName", "options": "RAM Request"},
+               "properties": [{"id": "unit", "value": "bytes"}, {"id": "custom.width", "value": 120}]},
+              {"matcher": {"id": "byName", "options": "RAM Limit"},
+               "properties": [{"id": "unit", "value": "bytes"}, {"id": "custom.width", "value": 120}]}
+            ]
+          },
           "transformations": [
             {"id": "merge", "options": {}},
-            {
-              "id": "organize",
-              "options": {
-                "renameByName": {
-                  "namespace": "Namespace",
-                  "pod": "Pod",
-                  "phase": "Phase",
-                  "Value": "狀態值"
-                },
-                "excludeByName": {
-                  "Time": true,
-                  "instance": true,
-                  "job": true,
-                  "uid": true,
-                  "Value": true
-                }
+            {"id": "organize", "options": {
+              "renameByName": {
+                "namespace": "Namespace",
+                "pod": "Pod",
+                "container": "Container",
+                "Value #A": "CPU Request (cores)",
+                "Value #B": "CPU Limit (cores)",
+                "Value #C": "RAM Request",
+                "Value #D": "RAM Limit"
+              },
+              "excludeByName": {
+                "Time": true, "instance": true, "job": true,
+                "node": true, "resource": true, "unit": true,
+                "__name__": true, "uid": true
               }
-            }
+            }}
           ],
           "targets": [
-            {
-              "datasource": "Prometheus",
-              "expr": "kube_pod_status_phase{phase=\"Running\"} == 1",
-              "instant": true,
-              "legendFormat": "",
-              "refId": "A"
-            }
+            {"datasource": "Prometheus",
+              "expr": "kube_pod_container_resource_requests{resource=\"cpu\"}",
+              "instant": true, "refId": "A", "legendFormat": ""},
+            {"datasource": "Prometheus",
+              "expr": "kube_pod_container_resource_limits{resource=\"cpu\"}",
+              "instant": true, "refId": "B", "legendFormat": ""},
+            {"datasource": "Prometheus",
+              "expr": "kube_pod_container_resource_requests{resource=\"memory\"}",
+              "instant": true, "refId": "C", "legendFormat": ""},
+            {"datasource": "Prometheus",
+              "expr": "kube_pod_container_resource_limits{resource=\"memory\"}",
+              "instant": true, "refId": "D", "legendFormat": ""}
+          ]
+        },
+        {
+          "id": 30, "gridPos": {"h": 6, "w": 24, "x": 0, "y": 26},
+          "type": "table",
+          "title": "Pod 狀態一覽 (Running)",
+          "options": {"showHeader": true},
+          "fieldConfig": {
+            "defaults": {"decimals": 0},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "phase"},
+               "properties": [
+                 {"id": "custom.displayMode", "value": "color-background"},
+                 {"id": "mappings", "value": [
+                   {"type": "value", "options": {"Running": {"color": "green", "index": 0},
+                     "Pending": {"color": "yellow", "index": 1},
+                     "Failed": {"color": "red", "index": 2}}}
+                 ]}
+               ]}
+            ]
+          },
+          "transformations": [
+            {"id": "merge", "options": {}},
+            {"id": "filterByValue", "options": {
+              "filters": [{"fieldName": "Value", "config": {"id": "equal", "options": {"value": 1}}}],
+              "type": "include",
+              "match": "all"
+            }},
+            {"id": "organize", "options": {
+              "renameByName": {"namespace": "Namespace", "pod": "Pod", "phase": "狀態"},
+              "excludeByName": {"Time": true, "instance": true, "job": true,
+                "uid": true, "Value": true, "__name__": true}
+            }}
+          ],
+          "targets": [
+            {"datasource": "Prometheus",
+              "expr": "kube_pod_status_phase",
+              "instant": true, "legendFormat": "", "refId": "A"}
           ]
         }
       ]
