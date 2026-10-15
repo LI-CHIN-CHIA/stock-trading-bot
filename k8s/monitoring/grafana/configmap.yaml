@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus.monitoring.svc:9090
+        access: proxy
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: monitoring
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        folder: Trading Bot
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-trading
+  namespace: monitoring
+data:
+  trading.json: |
+    {
+      "title": "Trading Bot",
+      "uid": "trading-bot-main",
+      "schemaVersion": 38,
+      "refresh": "30s",
+      "time": {"from": "now-24h", "to": "now"},
+      "panels": [
+        {
+          "id": 1, "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+          "type": "stat", "title": "現金 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+          "fieldConfig": {"defaults": {"unit": "currencyTWD", "decimals": 0,
+            "color": {"mode": "thresholds"},
+            "thresholds": {"steps": [{"color": "red","value": 0},{"color": "yellow","value": 10000},{"color": "green","value": 30000}]}}},
+          "targets": [{"expr": "trading_cash_twd{mode=\"live\"}", "legendFormat": "現金"}]
+        },
+        {
+          "id": 2, "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+          "type": "stat", "title": "持倉市值 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+          "fieldConfig": {"defaults": {"unit": "currencyTWD", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"expr": "trading_holding_value_twd{mode=\"live\"}", "legendFormat": "持倉"}]
+        },
+        {
+          "id": 3, "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+          "type": "stat", "title": "總資產 (Live)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "currencyTWD", "decimals": 0,
+            "color": {"mode": "thresholds"},
+            "thresholds": {"steps": [{"color": "red","value": 0},{"color": "green","value": 50000}]}}},
+          "targets": [{"expr": "trading_total_value_twd{mode=\"live\"}", "legendFormat": "總資產"}]
+        },
+        {
+          "id": 4, "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+          "type": "stat", "title": "持倉支數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "orange"}}},
+          "targets": [{"expr": "trading_position_count{mode=\"live\"}", "legendFormat": "持倉數"}]
+        },
+        {
+          "id": 5, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "type": "timeseries", "title": "總資產走勢",
+          "fieldConfig": {"defaults": {"unit": "currencyTWD", "custom": {"lineWidth": 2}}},
+          "targets": [
+            {"expr": "trading_total_value_twd{mode=\"live\"}", "legendFormat": "Live 總資產"},
+            {"expr": "trading_total_value_twd{mode=\"paper\"}", "legendFormat": "Paper 總資產"}
+          ]
+        },
+        {
+          "id": 6, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "type": "timeseries", "title": "現金 vs 持倉",
+          "fieldConfig": {"defaults": {"unit": "currencyTWD"}},
+          "targets": [
+            {"expr": "trading_cash_twd{mode=\"live\"}", "legendFormat": "現金"},
+            {"expr": "trading_holding_value_twd{mode=\"live\"}", "legendFormat": "持倉市值"}
+          ]
+        },
+        {
+          "id": 7, "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+          "type": "table", "title": "目前持倉明細",
+          "options": {"sortBy": [{"displayName": "未實現損益", "desc": true}]},
+          "fieldConfig": {"defaults": {"decimals": 0}},
+          "targets": [
+            {"expr": "trading_position_shares{mode=\"live\"}", "legendFormat": "{{ticker}}", "instant": true},
+            {"expr": "trading_position_entry_price{mode=\"live\"}", "legendFormat": "{{ticker}}", "instant": true},
+            {"expr": "trading_position_cost{mode=\"live\"}", "legendFormat": "{{ticker}}", "instant": true},
+            {"expr": "trading_position_unrealized_pnl{mode=\"live\"}", "legendFormat": "{{ticker}}", "instant": true},
+            {"expr": "trading_position_hold_days{mode=\"live\"}", "legendFormat": "{{ticker}}", "instant": true}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-infra
+  namespace: monitoring
+data:
+  infra.json: |
+    {
+      "title": "K8s Infrastructure",
+      "uid": "k8s-infra-main",
+      "schemaVersion": 38,
+      "refresh": "30s",
+      "time": {"from": "now-1h", "to": "now"},
+      "panels": [
+        {
+          "id": 1, "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+          "type": "stat", "title": "Node CPU 使用率",
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1,
+            "thresholds": {"steps": [{"color": "green","value": 0},{"color": "yellow","value": 70},{"color": "red","value": 90}]}}},
+          "targets": [{"expr": "100 - (avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[2m])) * 100)", "legendFormat": "CPU %"}]
+        },
+        {
+          "id": 2, "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+          "type": "stat", "title": "Node RAM 使用率",
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1,
+            "thresholds": {"steps": [{"color": "green","value": 0},{"color": "yellow","value": 75},{"color": "red","value": 90}]}}},
+          "targets": [{"expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100", "legendFormat": "RAM %"}]
+        },
+        {
+          "id": 3, "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+          "type": "stat", "title": "Node RAM 可用",
+          "fieldConfig": {"defaults": {"unit": "bytes", "decimals": 1}},
+          "targets": [{"expr": "node_memory_MemAvailable_bytes", "legendFormat": "可用 RAM"}]
+        },
+        {
+          "id": 4, "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+          "type": "stat", "title": "Running Pods",
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}},
+          "targets": [{"expr": "count(kube_pod_status_phase{phase=\"Running\"})", "legendFormat": "Running Pods"}]
+        },
+        {
+          "id": 5, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "type": "timeseries", "title": "Pod CPU 使用 (trading namespace)",
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 1}}},
+          "targets": [{"expr": "sum by(pod)(rate(container_cpu_usage_seconds_total{namespace=\"trading\",container!=\"\"}[2m])) * 1000", "legendFormat": "{{pod}}"}]
+        },
+        {
+          "id": 6, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "type": "timeseries", "title": "Pod Memory (trading namespace)",
+          "fieldConfig": {"defaults": {"unit": "bytes"}},
+          "targets": [{"expr": "container_memory_working_set_bytes{namespace=\"trading\",container!=\"\"}", "legendFormat": "{{pod}}/{{container}}"}]
+        },
+        {
+          "id": 7, "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+          "type": "table", "title": "Pod 狀態一覽",
+          "targets": [{"expr": "kube_pod_status_phase", "instant": true, "legendFormat": "{{namespace}}/{{pod}} — {{phase}}"}]
+        }
+      ]
+    }

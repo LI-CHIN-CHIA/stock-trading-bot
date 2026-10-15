@@ -1,0 +1,4 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY services/trading_exporter.py .
+CMD ["python", "trading_exporter.py"]

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trading-exporter
+  template:
+    metadata:
+      labels:
+        app: trading-exporter
+    spec:
+      # 需與 trading-bot 同節點才能掛相同 PVC（single-node k3s 自動滿足）
+      containers:
+        - name: trading-exporter
+          image: trading-exporter:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9877
+          env:
+            - name: STATE_FILE
+              value: /data/trader_state.json
+            - name: PAPER_FILE
+              value: /data/paper_trader_state.json
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9877
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          volumeMounts:
+            - name: trading-state
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: trading-state
+          persistentVolumeClaim:
+            claimName: trading-state-pvc
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-exporter
+  namespace: monitoring
+spec:
+  selector:
+    app: trading-exporter
+  ports:
+    - port: 9877
+      targetPort: 9877
