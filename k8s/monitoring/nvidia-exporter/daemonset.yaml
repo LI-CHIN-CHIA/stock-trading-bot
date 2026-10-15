@@ -19,6 +19,8 @@ spec:
         - name: nvidia-exporter
           image: nvidia-exporter:latest
           imagePullPolicy: Never
+          securityContext:
+            privileged: true
           ports:
             - containerPort: 9878
           env:
@@ -27,7 +29,7 @@ spec:
             - name: INTERVAL
               value: "10"
             - name: LD_LIBRARY_PATH
-              value: "/host-libs/x86_64-linux-gnu:/host-libs"
+              value: "/nvidia-libs"
           resources:
             requests:
               cpu: 10m
@@ -38,25 +40,50 @@ spec:
           volumeMounts:
             - name: nvidia-smi-bin
               mountPath: /usr/bin/nvidia-smi
-            - name: nvidia-libs
-              mountPath: /host-libs/x86_64-linux-gnu
+            - name: nvidia-ml-lib
+              mountPath: /nvidia-libs/libnvidia-ml.so.595.84
               readOnly: true
-            - name: nvidia-host-libs
-              mountPath: /host-libs
+            - name: nvidia-ml-lib-so1
+              mountPath: /nvidia-libs/libnvidia-ml.so.1
               readOnly: true
+            - name: dev-nvidia0
+              mountPath: /dev/nvidia0
+            - name: dev-nvidiactl
+              mountPath: /dev/nvidiactl
+            - name: dev-nvidia-modeset
+              mountPath: /dev/nvidia-modeset
+            - name: dev-nvidia-uvm
+              mountPath: /dev/nvidia-uvm
+            - name: dev-nvidia-uvm-tools
+              mountPath: /dev/nvidia-uvm-tools
       volumes:
         - name: nvidia-smi-bin
           hostPath:
             path: /usr/bin/nvidia-smi
             type: File
-        - name: nvidia-libs
+        - name: nvidia-ml-lib
           hostPath:
-            path: /lib/x86_64-linux-gnu
-            type: Directory
-        - name: nvidia-host-libs
+            path: /lib/x86_64-linux-gnu/libnvidia-ml.so.595.84
+            type: File
+        - name: nvidia-ml-lib-so1
           hostPath:
-            path: /lib
-            type: Directory
+            path: /lib/x86_64-linux-gnu/libnvidia-ml.so.595.84
+            type: File
+        - name: dev-nvidia0
+          hostPath:
+            path: /dev/nvidia0
+        - name: dev-nvidiactl
+          hostPath:
+            path: /dev/nvidiactl
+        - name: dev-nvidia-modeset
+          hostPath:
+            path: /dev/nvidia-modeset
+        - name: dev-nvidia-uvm
+          hostPath:
+            path: /dev/nvidia-uvm
+        - name: dev-nvidia-uvm-tools
+          hostPath:
+            path: /dev/nvidia-uvm-tools
 ---
 apiVersion: v1
 kind: Service
