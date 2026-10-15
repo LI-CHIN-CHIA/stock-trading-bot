@@ -45,6 +45,9 @@ spec:
             - name: dashboard-infra
               mountPath: /var/lib/grafana/dashboards/infra.json
               subPath: infra.json
+            - name: dashboard-gpu
+              mountPath: /var/lib/grafana/dashboards/gpu.json
+              subPath: gpu.json
             - name: storage
               mountPath: /var/lib/grafana
       volumes:
@@ -60,6 +63,9 @@ spec:
         - name: dashboard-infra
           configMap:
             name: grafana-dashboard-infra
+        - name: dashboard-gpu
+          configMap:
+            name: grafana-dashboard-gpu
         - name: storage
           emptyDir: {}
 ---

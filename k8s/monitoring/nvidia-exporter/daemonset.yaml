@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-exporter
+  template:
+    metadata:
+      labels:
+        app: nvidia-exporter
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-exporter
+          image: nvidia-exporter:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9878
+          env:
+            - name: PORT
+              value: "9878"
+            - name: INTERVAL
+              value: "10"
+            - name: LD_LIBRARY_PATH
+              value: "/host-libs/x86_64-linux-gnu:/host-libs"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: nvidia-smi-bin
+              mountPath: /usr/bin/nvidia-smi
+            - name: nvidia-libs
+              mountPath: /host-libs/x86_64-linux-gnu
+              readOnly: true
+            - name: nvidia-host-libs
+              mountPath: /host-libs
+              readOnly: true
+      volumes:
+        - name: nvidia-smi-bin
+          hostPath:
+            path: /usr/bin/nvidia-smi
+            type: File
+        - name: nvidia-libs
+          hostPath:
+            path: /lib/x86_64-linux-gnu
+            type: Directory
+        - name: nvidia-host-libs
+          hostPath:
+            path: /lib
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-exporter
+  namespace: monitoring
+spec:
+  selector:
+    app: nvidia-exporter
+  ports:
+    - port: 9878
+      targetPort: 9878

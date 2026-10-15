@@ -1,0 +1,5 @@
+FROM python:3.12-slim
+RUN pip install --no-cache-dir prometheus_client
+COPY services/nvidia_exporter.py /app/nvidia_exporter.py
+EXPOSE 9878
+CMD ["python3", "/app/nvidia_exporter.py"]

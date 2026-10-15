@@ -1,0 +1,210 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-gpu
+  namespace: monitoring
+data:
+  gpu.json: |
+    {
+      "title": "GPU Monitor",
+      "uid": "gpu-monitor-v1",
+      "schemaVersion": 38,
+      "refresh": "10s",
+      "time": {"from": "now-1h", "to": "now"},
+      "timezone": "Asia/Taipei",
+      "panels": [
+        {
+          "id": 1, "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+          "type": "gauge",
+          "title": "GPU 使用率 %",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "auto",
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "decimals": 1,
+              "min": 0, "max": 100,
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 70},
+                {"color": "red", "value": 90}
+              ]},
+              "color": {"mode": "thresholds"}
+            }
+          },
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_utilization_percent",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 2, "gridPos": {"h": 5, "w": 9, "x": 6, "y": 0},
+          "type": "bargauge",
+          "title": "VRAM 使用量 (已用 / 共32GB)",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "color"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes", "decimals": 1,
+              "min": 0, "max": 34183446528,
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 23928412870},
+                {"color": "red", "value": 30765101875}
+              ]},
+              "color": {"mode": "thresholds"}
+            }
+          },
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_memory_used_bytes",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 3, "gridPos": {"h": 5, "w": 9, "x": 15, "y": 0},
+          "type": "bargauge",
+          "title": "VRAM 剩餘 / 共32GB",
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]},
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "color"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes", "decimals": 1,
+              "min": 0, "max": 34183446528,
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 3418344653},
+                {"color": "green", "value": 10255033958}
+              ]},
+              "color": {"mode": "thresholds"}
+            }
+          },
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_memory_free_bytes",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 4, "gridPos": {"h": 4, "w": 4, "x": 0, "y": 5},
+          "type": "stat", "title": "溫度 °C",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "celsius", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 75}, {"color": "red","value": 85}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_temperature_celsius",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 5, "gridPos": {"h": 4, "w": 4, "x": 4, "y": 5},
+          "type": "stat", "title": "功耗 (W)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "watt", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 400}, {"color": "red","value": 550}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_power_draw_watts",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 6, "gridPos": {"h": 4, "w": 4, "x": 8, "y": 5},
+          "type": "stat", "title": "功耗上限 (W)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "watt", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_power_limit_watts",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 7, "gridPos": {"h": 4, "w": 4, "x": 12, "y": 5},
+          "type": "stat", "title": "風扇轉速 %",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percent", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 70}, {"color": "red","value": 90}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_fan_speed_percent",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 8, "gridPos": {"h": 4, "w": 4, "x": 16, "y": 5},
+          "type": "stat", "title": "SM Clock (MHz)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "purple"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_sm_clock_mhz",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 9, "gridPos": {"h": 4, "w": 4, "x": 20, "y": 5},
+          "type": "stat", "title": "Mem Clock (MHz)",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "purple"}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_memory_clock_mhz",
+            "instant": true, "legendFormat": "{{name}}"}]
+        },
+        {
+          "id": 10, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+          "type": "timeseries", "title": "GPU 使用率 % 走勢",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "percent", "custom": {"lineWidth": 2, "fillOpacity": 15}, "min": 0, "max": 100}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_utilization_percent",
+            "legendFormat": "GPU Util %"}]
+        },
+        {
+          "id": 11, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+          "type": "timeseries", "title": "VRAM 使用走勢",
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+          "targets": [
+            {"datasource": "Prometheus",
+              "expr": "nvidia_gpu_memory_used_bytes",
+              "legendFormat": "已用 VRAM"},
+            {"datasource": "Prometheus",
+              "expr": "nvidia_gpu_memory_total_bytes",
+              "legendFormat": "總 VRAM"}
+          ]
+        },
+        {
+          "id": 12, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17},
+          "type": "timeseries", "title": "溫度走勢 (°C)",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "celsius", "custom": {"lineWidth": 2, "fillOpacity": 10},
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "green","value": null}, {"color": "yellow","value": 75}, {"color": "red","value": 85}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "nvidia_gpu_temperature_celsius",
+            "legendFormat": "溫度"}]
+        },
+        {
+          "id": 13, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17},
+          "type": "timeseries", "title": "功耗走勢 (W)",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "watt", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+          "targets": [
+            {"datasource": "Prometheus",
+              "expr": "nvidia_gpu_power_draw_watts",
+              "legendFormat": "實際功耗"},
+            {"datasource": "Prometheus",
+              "expr": "nvidia_gpu_power_limit_watts",
+              "legendFormat": "功耗上限"}
+          ]
+        }
+      ]
+    }

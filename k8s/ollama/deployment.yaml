@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: trading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      runtimeClassName: nvidia
+      containers:
+      - name: ollama
+        image: ollama/ollama:latest
+        ports:
+        - containerPort: 11434
+        resources:
+          requests:
+            cpu: "1"
+            memory: 4Gi
+          limits:
+            cpu: "8"
+            memory: 21Gi
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: ollama-models
+          mountPath: /root/.ollama
+        env:
+        - name: OLLAMA_KEEP_ALIVE
+          value: "-1"
+        - name: OLLAMA_NUM_PARALLEL
+          value: "2"
+        - name: OLLAMA_MODELS
+          value: "/root/.ollama"
+      volumes:
+      - name: ollama-models
+        hostPath:
+          path: /home/ljj/.ollama
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: trading
+spec:
+  selector:
+    app: ollama
+  ports:
+  - port: 11434
+    targetPort: 11434
+  type: ClusterIP

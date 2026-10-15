@@ -30,6 +30,11 @@ data:
         static_configs:
           - targets: ['trading-exporter.trading.svc:9877']
 
+      # NVIDIA GPU Exporter（GPU 使用率、VRAM、溫度、功耗）
+      - job_name: nvidia-exporter
+        static_configs:
+          - targets: ['nvidia-exporter.monitoring.svc:9878']
+
       # k3s 內建 metrics API
       - job_name: k3s-metrics
         scheme: https
