@@ -28,7 +28,7 @@ data:
       # Trading Bot 自訂 metrics（持倉、損益、現金）
       - job_name: trading-exporter
         static_configs:
-          - targets: ['trading-exporter.monitoring.svc:9877']
+          - targets: ['trading-exporter.trading.svc:9877']
 
       # k3s 內建 metrics API
       - job_name: k3s-metrics
