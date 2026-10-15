@@ -141,6 +141,61 @@ data:
             {"datasource": "Prometheus", "expr": "trading_position_unrealized_pnl{mode=\"live\"}", "instant": true, "refId": "D", "legendFormat": ""},
             {"datasource": "Prometheus", "expr": "trading_position_hold_days{mode=\"live\"}", "instant": true, "refId": "E", "legendFormat": ""}
           ]
+        },
+        {
+          "id": 30, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
+          "type": "row", "title": "📊 當沖紙上交易 (Day Trade Watch)",
+          "collapsed": false
+        },
+        {
+          "id": 31, "gridPos": {"h": 4, "w": 5, "x": 0, "y": 21},
+          "type": "stat", "title": "當沖現金",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"datasource": "Prometheus", "expr": "day_trade_cash_twd", "instant": true, "legendFormat": "現金"}]
+        },
+        {
+          "id": 32, "gridPos": {"h": 4, "w": 5, "x": 5, "y": 21},
+          "type": "stat", "title": "今日損益",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [
+              {"color": "red","value": null}, {"color": "green","value": 0}]}}},
+          "targets": [{"datasource": "Prometheus", "expr": "day_trade_daily_pnl", "instant": true, "legendFormat": "損益"}]
+        },
+        {
+          "id": 33, "gridPos": {"h": 4, "w": 4, "x": 10, "y": 21},
+          "type": "stat", "title": "持倉數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "orange"}}},
+          "targets": [{"datasource": "Prometheus", "expr": "day_trade_positions", "instant": true, "legendFormat": "持倉"}]
+        },
+        {
+          "id": 34, "gridPos": {"h": 4, "w": 4, "x": 14, "y": 21},
+          "type": "stat", "title": "盯盤股數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "color": {"mode": "fixed", "fixedColor": "purple"}}},
+          "targets": [{"datasource": "Prometheus", "expr": "day_trade_watch_count", "instant": true, "legendFormat": "盯盤"}]
+        },
+        {
+          "id": 35, "gridPos": {"h": 4, "w": 6, "x": 18, "y": 21},
+          "type": "stat", "title": "今日交易次數",
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}},
+          "targets": [{"datasource": "Prometheus", "expr": "day_trade_trades_today", "instant": true, "legendFormat": "交易"}]
+        },
+        {
+          "id": 36, "gridPos": {"h": 6, "w": 24, "x": 0, "y": 25},
+          "type": "timeseries", "title": "當沖損益走勢 (今日)",
+          "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 15},
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red","value": null},{"color": "green","value": 0}]}}},
+          "targets": [{"datasource": "Prometheus",
+            "expr": "day_trade_daily_pnl",
+            "legendFormat": "當沖損益 TWD"}]
         }
       ]
     }

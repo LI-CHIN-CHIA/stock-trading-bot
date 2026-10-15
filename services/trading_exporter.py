@@ -9,8 +9,9 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-STATE_FILE = Path(os.getenv("STATE_FILE", "/data/trader_state.json"))
-PAPER_FILE = Path(os.getenv("PAPER_FILE", "/data/paper_trader_state.json"))
+STATE_FILE   = Path(os.getenv("STATE_FILE",   "/data/trader_state.json"))
+PAPER_FILE   = Path(os.getenv("PAPER_FILE",   "/data/paper_trader_state.json"))
+DAY_FILE     = Path(os.getenv("DAY_FILE",     "/data/day_trader_state.json"))
 PORT = int(os.getenv("EXPORTER_PORT", "9877"))
 
 
@@ -32,7 +33,7 @@ def build_metrics() -> str:
         label_str = f"{{{labels}}}" if labels else ""
         lines.append(f"{name}{label_str} {value}")
 
-    for mode, path in [("live", STATE_FILE), ("paper", PAPER_FILE)]:
+    for mode, path in [("live", STATE_FILE), ("paper", PAPER_FILE), ("day", DAY_FILE)]:
         state = _load(path)
         if not state:
             continue
@@ -92,6 +93,20 @@ def build_metrics() -> str:
                 realized += cost_approx * pct
         gauge("trading_realized_pnl_twd", realized,
               f'mode="{mode}"', "Estimated realized PnL TWD")
+
+    # ── 當沖專屬指標 ─────────────────────────────────────────────────────────
+    day_state = _load(DAY_FILE)
+    if day_state:
+        gauge("day_trade_cash_twd",    float(day_state.get("cash",      0)),
+              "", "Day trade paper cash TWD")
+        gauge("day_trade_daily_pnl",   float(day_state.get("daily_pnl", 0)),
+              "", "Day trade daily PnL TWD")
+        gauge("day_trade_positions",   float(len(day_state.get("holdings", {}))),
+              "", "Day trade open positions")
+        gauge("day_trade_watch_count", float(len(day_state.get("watch_log", {}))),
+              "", "Stocks being watched")
+        gauge("day_trade_trades_today",float(len(day_state.get("trade_log",  []))),
+              "", "Trades executed today")
 
     return "\n".join(lines) + "\n"
 

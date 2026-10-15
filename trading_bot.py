@@ -49,8 +49,10 @@ TZ = pytz.timezone("Asia/Taipei")
 
 # ── Trading Bot Instance ──────────────────────────────────────────────────────
 from trader.bot import TradingBot
+from trader.day_trader import DayTrader
 
-bot = TradingBot()
+bot      = TradingBot()
+day_bot  = DayTrader()
 
 
 # ── Market Day Check ──────────────────────────────────────────────────────────
@@ -77,6 +79,16 @@ def within_market_hours() -> bool:
 
 
 # ── Job Definitions ───────────────────────────────────────────────────────────
+
+def job_day_trader():
+    """每 2 分鐘盤中 — 當沖盯盤 / 紙上交易。"""
+    if not is_trading_day():
+        return
+    try:
+        day_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"當沖週期失敗: {e}", exc_info=True)
+
 
 def job_stock_discovery():
     """
@@ -325,6 +337,19 @@ def main():
     # misfire_grace_time=60: 若 job 超過 60 秒才啟動則直接跳過，避免重啟後補跑過期 job
     GRACE = 60
 
+    # 每 2 分鐘 09:00~13:30 — 當沖盯盤 / 紙上交易
+    scheduler.add_job(
+        job_day_trader,
+        CronTrigger(
+            minute="*/2",
+            hour="9,10,11,12,13",
+            day_of_week="mon-fri",
+            timezone=TZ,
+        ),
+        id="day_trader", name="當沖盯盤",
+        max_instances=1, coalesce=True, misfire_grace_time=30,
+    )
+
     # 08:30 — 開盤前選股發現（社群掃描 + 三大法人）
     scheduler.add_job(
         job_stock_discovery,
@@ -381,6 +406,7 @@ def main():
     logger.info("排程設定完成:")
     logger.info("  08:30        → 開盤前選股發現（社群掃描 + 三大法人）")
     logger.info("  09:10        → 開盤掃描選股")
+    logger.info("  每2分鐘      → 當沖盯盤 / 紙上交易 (09:00~13:30)")
     logger.info("  每3分鐘      → 監控停損/停利 (09:00~13:30)")
     logger.info("  13:30        → 收盤最後掃描")
     logger.info("  14:35 (週一) → AI 週度重訓（walk-forward）")

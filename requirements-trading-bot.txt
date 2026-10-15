@@ -1,0 +1,12 @@
+lightgbm>=4.6.0
+pandas>=3.0.1
+pandas-ta>=0.4.71b0
+pandas_market_calendars>=5.3.1.2
+python-dotenv>=1.2.2
+pytz>=2025.2
+scikit-learn>=1.8.0
+yfinance>=1.2.0
+APScheduler>=3.11.2
+requests
+beautifulsoup4
+curl-cffi

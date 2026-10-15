@@ -25,6 +25,8 @@ spec:
               value: /data/trader_state.json
             - name: PAPER_FILE
               value: /data/paper_trader_state.json
+            - name: DAY_FILE
+              value: /data/day_trader_state.json
           resources:
             requests:
               cpu: 10m

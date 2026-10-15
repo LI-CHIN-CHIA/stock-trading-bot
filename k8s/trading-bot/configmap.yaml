@@ -4,14 +4,20 @@ metadata:
   name: trading-config
   namespace: trading
 data:
-  PAPER_TRADING: "true"
-  MODEL_TYPE: "ensemble"
+  PAPER_TRADING: "false"
+  MODEL_TYPE: "double_ensemble"
   ENABLE_TRADING_AGENTS: "true"
   TA_DEEP_MODEL: "qwen2.5:32b"
   TA_QUICK_MODEL: "qwen2.5:14b"
   TA_HOLDING_TTL_MIN: "90"
   TA_SCAN_TTL_MIN: "480"
   OLLAMA_HOST: "http://ollama:11434"
+  ENABLE_DAY_TRADING: "false"
+  DAY_INITIAL_CAPITAL: "300000"
+  DAY_PER_TRADE_PCT: "0.20"
+  DAY_MAX_POSITIONS: "3"
+  DAY_STOP_LOSS_PCT: "-0.015"
+  DAY_TAKE_PROFIT_PCT: "0.025"
   DATA_DIR: "/data"
   MIN_CASH_RESERVE_PCT: "0.20"
   DRAWDOWN_BREAKER_PCT: "0.15"

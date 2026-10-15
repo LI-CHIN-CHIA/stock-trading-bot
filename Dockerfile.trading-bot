@@ -1,0 +1,33 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y \
+    libssl-dev ca-certificates curl libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 先裝依賴（利用 Docker layer cache）
+COPY requirements-trading-bot.txt .
+COPY wheels/ wheels/
+RUN pip install --no-cache-dir \
+    psycopg2-binary \
+    wheels/fubon_neo-2.2.8-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
+    -r requirements-trading-bot.txt
+
+# 複製原始碼
+COPY ai/               ai/
+COPY trader/           trader/
+COPY utils/            utils/
+COPY analysis/         analysis/
+COPY trading_bot.py    .
+# tradingagents 未發佈至 PyPI，直接複製已安裝的 package
+COPY tradingagents_pkg/ /usr/local/lib/python3.12/site-packages/tradingagents/
+
+# 資料目錄從 PVC 掛載，憑證從 Secret 掛載
+ENV DATA_DIR=/data
+ENV PAPER_TRADING=true
+ENV OLLAMA_HOST=http://ollama:11434
+
+VOLUME ["/data", "/certs"]
+
+CMD ["python", "trading_bot.py"]
