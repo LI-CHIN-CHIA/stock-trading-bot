@@ -257,7 +257,7 @@ class DayTrader:
     """當沖紙上交易，每 1 分鐘 run_cycle() 一次；持倉時背景執行緒每 10 秒盯盤。"""
 
     def __init__(self):
-        self._lock         = threading.Lock()
+        self._lock         = threading.RLock()  # RLock 允許同執行緒重入（run_cycle → _paper_sell）
         self._state        = self._load_state()
         self._model        = self._load_model()
         self._monitor_stop = threading.Event()
@@ -282,60 +282,63 @@ class DayTrader:
         self._monitor_stop.set()
 
     def _fast_monitor_loop(self):
-        """背景執行緒：有持倉時每 10 秒檢查停損/停利。"""
+        """背景執行緒：有持倉時每 10 秒檢查停損/停利。
+        設計原則：網路 I/O (_fast_price) 在鎖外執行，避免與 run_cycle 互相卡死。
+        """
         while not self._monitor_stop.is_set():
             time.sleep(_FAST_MONITOR_INTERVAL)
+            # 快速快照（短暫持鎖）
             with self._lock:
-                holdings = self._state.get("holdings", {})
-                if not holdings:
-                    # 無持倉 → 停止執行緒
-                    self._monitor_stop.set()
-                    logger.info("[DayTrader] ⏱ 無持倉，10秒盯盤執行緒停止")
-                    break
-                now = self._now_tw()
-                if not ((9, 0) <= (now.hour, now.minute) <= (13, 30)):
-                    continue
-                for code in list(holdings):
-                    try:
-                        price = _fast_price(code)
-                        if price is None:
-                            continue
-                        h = holdings[code]
-                        entry = h["entry_price"]
-                        pct   = (price - entry) / entry
-                        sl    = h["stop_loss"]
-                        tp    = h["take_profit"]
+                holdings_snap = dict(self._state.get("holdings", {}))
+            if not holdings_snap:
+                self._monitor_stop.set()
+                logger.info("[DayTrader] ⏱ 無持倉，10秒盯盤執行緒停止")
+                break
+            now = self._now_tw()
+            if not ((9, 0) <= (now.hour, now.minute) <= (13, 30)):
+                continue
+            # 網路取價在鎖外（避免佔鎖 0.5~2 秒）
+            for code in list(holdings_snap):
+                try:
+                    price = _fast_price(code)
+                    if price is None:
+                        continue
+                    h = holdings_snap[code]
+                    entry = h["entry_price"]
+                    pct   = (price - entry) / entry
+                    sl    = h["stop_loss"]
+                    tp    = h["take_profit"]
 
-                        # 推播持倉狀態（每分鐘第一次 tick，避免過多訊息）
-                        if now.second < 15:
-                            try:
-                                from utils.telegram_notify import send, _name
-                                send(
-                                    f"📍 <b>釘盤 {_name(code)}</b>  {price:.2f}"
-                                    f"  ({pct:+.2%})\n"
-                                    f"SL {sl:.2f} / TP {tp:.2f}",
-                                    key=f"watch:{code}:{now.minute}",
-                                    cooldown=50,
-                                )
-                            except Exception:
-                                pass
+                    # 推播持倉狀態（每分鐘第一次 tick，避免過多訊息）
+                    if now.second < 15:
+                        try:
+                            from utils.telegram_notify import send, _name
+                            send(
+                                f"📍 <b>釘盤 {_name(code)}</b>  {price:.2f}"
+                                f"  ({pct:+.2%})\n"
+                                f"SL {sl:.2f} / TP {tp:.2f}",
+                                key=f"watch:{code}:{now.minute}",
+                                cooldown=50,
+                            )
+                        except Exception:
+                            pass
 
-                        # 觸發停損
-                        if price <= sl:
-                            self._paper_sell(code, price, f"停損 {sl:.2f}")
-                        # 觸發停利
-                        elif price >= tp:
-                            self._paper_sell(code, price, f"停利 {tp:.2f}")
-                        # 即將觸碰停損 (距 SL < 0.3%) → 緊急預警
-                        elif (price - sl) / entry < 0.003:
-                            try:
-                                from utils.telegram_notify import send, _name
-                                send(f"⚠️ <b>接近停損 {_name(code)}</b>  現價 {price:.2f}  SL {sl:.2f}",
-                                     key=f"nearsl:{code}", cooldown=120)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.debug(f"[DayTrader] fast_monitor {code} 異常: {e}")
+                    # 觸發停損/停利（_paper_sell 內部持鎖）
+                    if price <= sl:
+                        self._paper_sell(code, price, f"停損 {sl:.2f}")
+                    elif price >= tp:
+                        self._paper_sell(code, price, f"停利 {tp:.2f}")
+                    # 即將觸碰停損 (距 SL < 0.3%) → 緊急預警
+                    elif (price - sl) / entry < 0.003:
+                        try:
+                            from utils.telegram_notify import send, _name
+                            send(f"⚠️ <b>接近停損 {_name(code)}</b>  現價 {price:.2f}  SL {sl:.2f}",
+                                 key=f"nearsl:{code}", cooldown=120)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"[DayTrader] fast_monitor {code} 異常: {e}")
+            with self._lock:
                 self._save_state()
 
     def _load_model(self):
@@ -384,6 +387,18 @@ class DayTrader:
     def _reset_if_new_day(self):
         today = str(date.today())
         if self._state.get("date") != today:
+            # 若有未平倉部位，先告警再清除（#4：避免靜默吞掉昨日倉位）
+            leftover = self._state.get("holdings", {})
+            if leftover:
+                logger.warning(f"[DayTrader] ⚠️ 昨日有 {len(leftover)} 個未平倉部位被清除: {list(leftover)}")
+                try:
+                    from utils.telegram_notify import send
+                    send(f"⚠️ <b>當沖未平倉警告</b>\n昨日收盤後仍有 {len(leftover)} 筆持倉被清除:\n"
+                         + "\n".join(f"  {c}: {h['shares']}股 @{h['entry_price']:.2f}"
+                                     for c, h in leftover.items()),
+                         key=f"leftover:{today}", cooldown=0)
+                except Exception:
+                    pass
             logger.info(f"[DayTrader] 新的一天（{today}），重置帳戶")
             closed_pnl = self._state.get("daily_pnl", 0.0)
             self._state = self._new_state()
@@ -415,6 +430,11 @@ class DayTrader:
 
     def _paper_buy(self, code: str, price: float, analysis: dict,
                    predicted_gain: float | None = None) -> bool:
+        with self._lock:
+            return self.__paper_buy(code, price, analysis, predicted_gain)
+
+    def __paper_buy(self, code: str, price: float, analysis: dict,
+                    predicted_gain: float | None = None) -> bool:
         holdings = self._state["holdings"]
         if code in holdings:
             return False
@@ -462,6 +482,10 @@ class DayTrader:
         return True
 
     def _paper_sell(self, code: str, price: float, reason: str) -> float:
+        with self._lock:
+            return self.__paper_sell(code, price, reason)
+
+    def __paper_sell(self, code: str, price: float, reason: str) -> float:
         holdings = self._state["holdings"]
         if code not in holdings:
             return 0.0
@@ -663,22 +687,23 @@ class DayTrader:
                 pass
 
     def run_cycle(self):
+        # 只在 reset/is_open 短暫持鎖，避免長時間佔鎖卡住 10 秒盯盤執行緒
         with self._lock:
             self._reset_if_new_day()
             if not self._is_market_open():
                 return
 
-            # 大量告警：無論是否啟用交易都掃
-            self._alert_volume_surges()
+        # 網路 I/O（下載 K 棒）在鎖外執行
+        self._alert_volume_surges()
 
-            if ENABLE_DAY_TRADING:
-                self._check_holdings()
-                self._scan_entries()
-                self._log_portfolio_status()
-            else:
-                # 盯盤模式：不下單，但持續分析並記錄
-                self._watch_only()
+        if ENABLE_DAY_TRADING:
+            self._check_holdings()
+            self._scan_entries()
+            self._log_portfolio_status()
+        else:
+            self._watch_only()
 
+        with self._lock:
             self._save_state()
 
     def _log_portfolio_status(self):

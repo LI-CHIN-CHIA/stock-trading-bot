@@ -295,12 +295,12 @@ def job_daily_summary():
     # ── Telegram 每日戰報 ────────────────────────────────────────────────────
     try:
         from utils.telegram_notify import send
+        from utils.constants import STOCK_DB  # 提前 import，避免 day_holdings 段 NameError
 
         # 實盤部分
         real_mode = "🔴 實盤" if not paper else "📄 紙上"
         pos_lines = ""
         for p in positions:
-            from utils.constants import STOCK_DB
             name = STOCK_DB.get(p["ticker"], p["ticker"]).split()[0]
             pos_lines += f"  {p['ticker']} {name} {p['pnl_pct']:+.1%}\n"
 
