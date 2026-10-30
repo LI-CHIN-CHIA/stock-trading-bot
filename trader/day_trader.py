@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, date
 from pathlib import Path
 
@@ -34,6 +35,13 @@ import yfinance as yf
 from utils.constants import OTC_SYMBOLS, TRADEABLE
 
 logger = logging.getLogger(__name__)
+
+# Lazy-load DayModel to avoid import errors if ai package isn't ready
+try:
+    from ai.day_model import DayModel as _DayModel
+    _DAY_MODEL_AVAILABLE = True
+except ImportError:
+    _DAY_MODEL_AVAILABLE = False
 
 TZ = pytz.timezone("Asia/Taipei")
 
@@ -47,10 +55,22 @@ DAY_FORCE_CLOSE_H   = 13
 DAY_FORCE_CLOSE_M   = 20
 ENABLE_DAY_TRADING  = os.getenv("ENABLE_DAY_TRADING", "false").lower() == "true"
 
-_INTERVAL = "2m"   # yfinance 2-minute bars (stable for intraday)
+# 手續費 & 證交稅（當沖）
+_COMMISSION_RATE = 0.001425   # 券商手續費 0.1425%（可折扣）
+_STT_RATE        = 0.0015     # 證交稅 0.15%（當沖減半）
+_MIN_FEE         = 20         # 最低手續費 20 元
+
+# 量能門檻：近20根1min K 均量至少 15,000 股（≈日均3000張@1min），進場那根至少均量 80%
+DAY_MIN_AVG_VOLUME    = int(os.getenv("DAY_MIN_AVG_VOLUME",    "15000"))
+DAY_MIN_ENTRY_VOL_PCT = float(os.getenv("DAY_MIN_ENTRY_VOL_PCT", "0.8"))
+
+_INTERVAL = "1m"   # 1-minute bars for tighter monitoring
 _PERIOD   = "1d"
 
 WATCH_STOCKS: set[str] = TRADEABLE   # 用現有候選清單
+
+# 大量告警門檻：當前K棒量 >= 均量 × N 倍觸發
+VOL_SURGE_ALERT_X = float(os.getenv("VOL_SURGE_ALERT_X", "3.0"))
 
 
 def _symbol(code: str) -> str:
@@ -220,12 +240,117 @@ def _fetch_intraday(code: str) -> pd.DataFrame | None:
 
 # ── 主類別 ────────────────────────────────────────────────────────────────────
 
+_FAST_MONITOR_INTERVAL = 10   # 持倉時每 10 秒查一次即時價
+
+
+def _fast_price(code: str) -> float | None:
+    """用 yfinance fast_info 快速取得最新成交價（不下載完整 K 棒）。"""
+    try:
+        info = yf.Ticker(_symbol(code)).fast_info
+        p = getattr(info, "last_price", None) or getattr(info, "regularMarketPrice", None)
+        return float(p) if p else None
+    except Exception:
+        return None
+
+
 class DayTrader:
-    """當沖紙上交易，每 2 分鐘 run_cycle() 一次。"""
+    """當沖紙上交易，每 1 分鐘 run_cycle() 一次；持倉時背景執行緒每 10 秒盯盤。"""
 
     def __init__(self):
-        self._lock  = threading.Lock()
-        self._state = self._load_state()
+        self._lock         = threading.Lock()
+        self._state        = self._load_state()
+        self._model        = self._load_model()
+        self._monitor_stop = threading.Event()
+        self._monitor_thr: threading.Thread | None = None
+        # 若啟動時已有持倉（跨週期 reload），立即啟動背景監控
+        if self._state.get("holdings"):
+            self._start_fast_monitor()
+
+    # ── 10 秒背景盯盤 ─────────────────────────────────────────────────────────
+
+    def _start_fast_monitor(self):
+        if self._monitor_thr and self._monitor_thr.is_alive():
+            return
+        self._monitor_stop.clear()
+        self._monitor_thr = threading.Thread(
+            target=self._fast_monitor_loop, daemon=True, name="DayTrader-FastMonitor"
+        )
+        self._monitor_thr.start()
+        logger.info("[DayTrader] ⏱ 10秒盯盤執行緒已啟動")
+
+    def _stop_fast_monitor(self):
+        self._monitor_stop.set()
+
+    def _fast_monitor_loop(self):
+        """背景執行緒：有持倉時每 10 秒檢查停損/停利。"""
+        while not self._monitor_stop.is_set():
+            time.sleep(_FAST_MONITOR_INTERVAL)
+            with self._lock:
+                holdings = self._state.get("holdings", {})
+                if not holdings:
+                    # 無持倉 → 停止執行緒
+                    self._monitor_stop.set()
+                    logger.info("[DayTrader] ⏱ 無持倉，10秒盯盤執行緒停止")
+                    break
+                now = self._now_tw()
+                if not ((9, 0) <= (now.hour, now.minute) <= (13, 30)):
+                    continue
+                for code in list(holdings):
+                    try:
+                        price = _fast_price(code)
+                        if price is None:
+                            continue
+                        h = holdings[code]
+                        entry = h["entry_price"]
+                        pct   = (price - entry) / entry
+                        sl    = h["stop_loss"]
+                        tp    = h["take_profit"]
+
+                        # 推播持倉狀態（每分鐘第一次 tick，避免過多訊息）
+                        if now.second < 15:
+                            try:
+                                from utils.telegram_notify import send, _name
+                                send(
+                                    f"📍 <b>釘盤 {_name(code)}</b>  {price:.2f}"
+                                    f"  ({pct:+.2%})\n"
+                                    f"SL {sl:.2f} / TP {tp:.2f}",
+                                    key=f"watch:{code}:{now.minute}",
+                                    cooldown=50,
+                                )
+                            except Exception:
+                                pass
+
+                        # 觸發停損
+                        if price <= sl:
+                            self._paper_sell(code, price, f"停損 {sl:.2f}")
+                        # 觸發停利
+                        elif price >= tp:
+                            self._paper_sell(code, price, f"停利 {tp:.2f}")
+                        # 即將觸碰停損 (距 SL < 0.3%) → 緊急預警
+                        elif (price - sl) / entry < 0.003:
+                            try:
+                                from utils.telegram_notify import send, _name
+                                send(f"⚠️ <b>接近停損 {_name(code)}</b>  現價 {price:.2f}  SL {sl:.2f}",
+                                     key=f"nearsl:{code}", cooldown=120)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.debug(f"[DayTrader] fast_monitor {code} 異常: {e}")
+                self._save_state()
+
+    def _load_model(self):
+        if not _DAY_MODEL_AVAILABLE:
+            return None
+        try:
+            m = _DayModel.load_latest()
+            if m:
+                logger.info(f"[DayTrader] 當沖 model 已載入，trained_at={m.trained_at}")
+            else:
+                logger.info("[DayTrader] 無當沖 model，使用純規則選股")
+            return m
+        except Exception as e:
+            logger.warning(f"[DayTrader] model 載入失敗: {e}")
+            return None
 
     # ── 狀態 I/O ─────────────────────────────────────────────────────────────
 
@@ -278,9 +403,9 @@ class DayTrader:
         return (9, 0) <= (now.hour, now.minute) <= (13, 30)
 
     def _is_buy_window(self) -> bool:
-        """只在 09:05 ~ 11:00 買進，避免尾盤追高。"""
+        """09:05 ~ 12:30 均可買進（大量突破盤中隨時出現）。"""
         now = self._now_tw()
-        return (9, 5) <= (now.hour, now.minute) < (11, 0)
+        return (9, 5) <= (now.hour, now.minute) < (12, 30)
 
     def _is_force_close_time(self) -> bool:
         now = self._now_tw()
@@ -288,7 +413,8 @@ class DayTrader:
 
     # ── 買賣執行（紙上）──────────────────────────────────────────────────────
 
-    def _paper_buy(self, code: str, price: float, analysis: dict) -> bool:
+    def _paper_buy(self, code: str, price: float, analysis: dict,
+                   predicted_gain: float | None = None) -> bool:
         holdings = self._state["holdings"]
         if code in holdings:
             return False
@@ -296,27 +422,43 @@ class DayTrader:
             return False
 
         budget  = self._state["cash"] * DAY_PER_TRADE_PCT
-        shares  = int(budget // (price * 1000)) * 1000  # 整張
+        # 先嘗試整張（1000股倍數），不足1張才買零股
+        shares = int(budget // (price * 1000)) * 1000
+        if shares <= 0:
+            shares = int(budget // price)   # 零股：至少 1 股
         if shares <= 0:
             return False
-        cost    = shares * price
-        if cost > self._state["cash"]:
+        cost     = shares * price
+        buy_fee  = max(_MIN_FEE, round(cost * _COMMISSION_RATE))
+        total_cost = cost + buy_fee
+        if total_cost > self._state["cash"]:
             return False
 
-        self._state["cash"] -= cost
+        self._state["cash"] -= total_cost
         holdings[code] = {
-            "shares":      shares,
-            "entry_price": price,
-            "entry_time":  self._now_tw().strftime("%H:%M"),
-            "cost":        cost,
-            "stop_loss":   round(price * (1 + DAY_STOP_LOSS_PCT), 2),
-            "take_profit": round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+            "shares":         shares,
+            "entry_price":    price,
+            "entry_time":     self._now_tw().strftime("%H:%M"),
+            "cost":           total_cost,   # 含買進手續費
+            "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
+            "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+            "predicted_gain": round(predicted_gain * 100, 3) if predicted_gain is not None else None,
         }
-        self._log_trade(code, "BUY", shares, price, "當沖買入", analysis)
+        self._log_trade(code, "BUY", shares, price, "當沖買入", analysis, predicted_gain)
+        gain_str = f"  model={predicted_gain*100:.2f}%" if predicted_gain is not None else ""
         logger.info(
             f"[DayTrader] 🟢 買入 {code}  {shares}股 @{price:.2f}"
             f"  score={analysis.get('score')}  delta={analysis.get('vol_delta_signal')}"
+            f"{gain_str}"
         )
+        try:
+            from utils.telegram_notify import notify_buy
+            notify_buy("當沖", code, shares, price,
+                       f"score={analysis.get('score')} model={predicted_gain*100:.2f}%" if predicted_gain else f"score={analysis.get('score')}")
+        except Exception:
+            pass
+        # 有持倉 → 啟動 10 秒盯盤執行緒
+        self._start_fast_monitor()
         return True
 
     def _paper_sell(self, code: str, price: float, reason: str) -> float:
@@ -326,31 +468,42 @@ class DayTrader:
         h       = holdings.pop(code)
         shares  = h["shares"]
         cost    = h["cost"]
-        proceeds= shares * price
-        pnl     = proceeds - cost
-        self._state["cash"]      += proceeds
+        proceeds = shares * price
+        sell_fee = max(_MIN_FEE, round(proceeds * _COMMISSION_RATE))
+        stt      = round(proceeds * _STT_RATE)
+        net_proceeds = proceeds - sell_fee - stt
+        pnl     = net_proceeds - cost
+        self._state["cash"]      += net_proceeds
         self._state["daily_pnl"] += pnl
         self._log_trade(code, "SELL", shares, price, reason, {})
         emoji = "🟩" if pnl >= 0 else "🟥"
         logger.info(
             f"[DayTrader] {emoji} 賣出 {code}  {shares}股 @{price:.2f}"
-            f"  損益={pnl:+,.0f} TWD  原因={reason}"
+            f"  手續費={sell_fee+stt:,.0f}  損益={pnl:+,.0f} TWD  原因={reason}"
         )
+        try:
+            from utils.telegram_notify import notify_sell
+            notify_sell("當沖", code, shares, price, pnl, reason)
+        except Exception:
+            pass
         return pnl
 
     def _log_trade(self, code: str, side: str, shares: int,
-                   price: float, reason: str, analysis: dict):
-        self._state["trade_log"].append({
-            "time":     self._now_tw().strftime("%H:%M"),
-            "code":     code,
-            "side":     side,
-            "shares":   shares,
-            "price":    price,
-            "reason":   reason,
-            "score":    analysis.get("score"),
-            "delta":    analysis.get("vol_delta_signal"),
-            "pattern":  analysis.get("pattern"),
-        })
+                   price: float, reason: str, analysis: dict,
+                   predicted_gain: float | None = None):
+        entry = {
+            "time":            self._now_tw().strftime("%H:%M"),
+            "code":            code,
+            "side":            side,
+            "shares":          shares,
+            "price":           price,
+            "reason":          reason,
+            "score":           analysis.get("score"),
+            "delta":           analysis.get("vol_delta_signal"),
+            "pattern":         analysis.get("pattern"),
+            "predicted_gain":  round(predicted_gain * 100, 3) if predicted_gain is not None else None,
+        }
+        self._state["trade_log"].append(entry)
 
     # ── 持倉檢查 ─────────────────────────────────────────────────────────────
 
@@ -402,7 +555,19 @@ class DayTrader:
             if not analysis:
                 continue
             self._update_watch_log(code, analysis)
-            if analysis["score"] >= 3:
+            avg_vol  = analysis.get("avg_volume", 0)
+            last_vol = analysis.get("last_volume", 0)
+            vol_ratio = (last_vol / avg_vol) if avg_vol > 0 else 0
+            # 大量爆發（≥3x 均量）降低 score 門檻至 2；一般需 score≥3
+            score_threshold = 2 if vol_ratio >= VOL_SURGE_ALERT_X else 3
+            if analysis["score"] >= score_threshold:
+                # 量能硬性門檻：流動性不足直接跳過
+                if avg_vol < DAY_MIN_AVG_VOLUME:
+                    logger.debug(f"[DayTrader] {code} 均量不足 ({avg_vol:.0f} < {DAY_MIN_AVG_VOLUME})，跳過")
+                    continue
+                if last_vol < avg_vol * DAY_MIN_ENTRY_VOL_PCT:
+                    logger.debug(f"[DayTrader] {code} 進場K棒量太小 ({last_vol:.0f} < avg×{DAY_MIN_ENTRY_VOL_PCT})，跳過")
+                    continue
                 candidates.append((code, analysis["score"], analysis))
 
         # 取得分最高的進場
@@ -411,6 +576,20 @@ class DayTrader:
             if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
                 break
             price = analysis["price"]
+
+            # ── Model confirmation ────────────────────────────────────────────
+            predicted_gain: float | None = None
+            if self._model is not None:
+                df_for_model = _fetch_intraday(code)
+                if df_for_model is not None:
+                    go, predicted_gain = self._model.is_buy_signal(df_for_model, analysis)
+                    if not go:
+                        logger.info(
+                            f"[DayTrader] ⛔ {code} score={score} "
+                            f"model_pred={predicted_gain*100:.2f}% < threshold, skip"
+                        )
+                        continue
+
             logger.info(
                 f"[DayTrader] 📊 {code} score={score}"
                 f"  vwap={'↑' if analysis['above_vwap'] else '↓'}"
@@ -418,9 +597,10 @@ class DayTrader:
                 f"  surge={'✓' if analysis['vol_surge'] else '✗'}"
                 f"  breakout={'✓' if analysis['breakout'] else '✗'}"
                 f"  pattern={analysis['pattern']}"
-                f"  @{price:.2f}"
+                + (f"  model={predicted_gain*100:.2f}%" if predicted_gain is not None else "")
+                + f"  @{price:.2f}"
             )
-            self._paper_buy(code, price, analysis)
+            self._paper_buy(code, price, analysis, predicted_gain)
 
     # ── 只盯盤不交易（ENABLE_DAY_TRADING=false 時）────────────────────────────
 
@@ -455,11 +635,41 @@ class DayTrader:
 
     # ── 主迴圈 ───────────────────────────────────────────────────────────────
 
+    def _alert_volume_surges(self):
+        """掃描大量股票並推播 Telegram（不受 ENABLE_DAY_TRADING 限制，純告警）。"""
+        try:
+            from utils.telegram_notify import notify_volume_surge
+        except ImportError:
+            return
+        for code in WATCH_STOCKS:
+            try:
+                df = _fetch_intraday(code)
+                if df is None or len(df) < 10:
+                    continue
+                vol = df["Volume"]
+                avg_vol = float(vol.iloc[-21:-1].mean()) if len(vol) >= 21 else float(vol.mean())
+                last_vol = float(vol.iloc[-1])
+                if avg_vol <= 0:
+                    continue
+                ratio = last_vol / avg_vol
+                if ratio >= VOL_SURGE_ALERT_X:
+                    price = float(df["Close"].iloc[-1])
+                    analysis = _analyze_bars(df) or {}
+                    score = analysis.get("score", 0)
+                    action = "⚡進場候選" if score >= 3 else "觀察"
+                    notify_volume_surge(code, price, ratio, score, action)
+                    logger.info(f"[DayTrader] 📢 大量 {code} vol_ratio={ratio:.1f}x price={price:.2f} score={score}")
+            except Exception:
+                pass
+
     def run_cycle(self):
         with self._lock:
             self._reset_if_new_day()
             if not self._is_market_open():
                 return
+
+            # 大量告警：無論是否啟用交易都掃
+            self._alert_volume_surges()
 
             if ENABLE_DAY_TRADING:
                 self._check_holdings()

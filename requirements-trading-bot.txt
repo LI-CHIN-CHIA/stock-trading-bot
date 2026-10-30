@@ -10,3 +10,11 @@ APScheduler>=3.11.2
 requests
 beautifulsoup4
 curl-cffi
+playwright>=1.40.0
+rank-bm25>=0.2.2
+# tradingagents dependencies
+pydantic>=2.0.0
+ollama>=0.3.0
+langchain-core>=0.3.0
+langchain-ollama>=0.2.0
+langgraph>=0.2.0

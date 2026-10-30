@@ -50,9 +50,11 @@ TZ = pytz.timezone("Asia/Taipei")
 # ── Trading Bot Instance ──────────────────────────────────────────────────────
 from trader.bot import TradingBot
 from trader.day_trader import DayTrader
+from trader.overnight_trader import OvernightTrader
 
-bot      = TradingBot()
-day_bot  = DayTrader()
+bot           = TradingBot()
+day_bot       = DayTrader()
+overnight_bot = OvernightTrader()
 
 
 # ── Market Day Check ──────────────────────────────────────────────────────────
@@ -88,6 +90,16 @@ def job_day_trader():
         day_bot.run_cycle()
     except Exception as e:
         logger.error(f"當沖週期失敗: {e}", exc_info=True)
+
+
+def job_overnight_trader():
+    """每 2 分鐘 — 隔日沖尾盤佈局 + 隔日早盤出場。"""
+    if not is_trading_day():
+        return
+    try:
+        overnight_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"隔日沖週期失敗: {e}", exc_info=True)
 
 
 def job_stock_discovery():
@@ -183,6 +195,20 @@ def job_monitor():
         logger.error(f"重訓條件檢查失敗: {e}", exc_info=True)
 
 
+def job_intraday_scan():
+    """每15分鐘盤中 — 日間補掃，抓住盤中新機會。"""
+    if not is_trading_day() or not within_market_hours():
+        return
+    logger.info("--- 日間補掃 ---")
+    try:
+        bot._sync_account_balance()
+        bot._sync_holdings_from_fubon()
+        bot._scan_and_buy()
+        bot._save_state()
+    except Exception as e:
+        logger.error(f"日間補掃失敗: {e}", exc_info=True)
+
+
 def job_close_scan():
     """13:30 — 收盤前最後一次掃描與監控。"""
     if not is_trading_day():
@@ -266,6 +292,54 @@ def job_daily_summary():
         logger.info("   ⚠️  以上為模擬交易，未產生真實損益")
     logger.info("=" * 55)
 
+    # ── Telegram 每日戰報 ────────────────────────────────────────────────────
+    try:
+        from utils.telegram_notify import send
+
+        # 實盤部分
+        real_mode = "🔴 實盤" if not paper else "📄 紙上"
+        pos_lines = ""
+        for p in positions:
+            from utils.constants import STOCK_DB
+            name = STOCK_DB.get(p["ticker"], p["ticker"]).split()[0]
+            pos_lines += f"  {p['ticker']} {name} {p['pnl_pct']:+.1%}\n"
+
+        real_msg = (
+            f"📊 <b>台股每日戰報 {today}</b>  {real_mode}\n"
+            f"{'─'*28}\n"
+            f"💰 現金: {bot.cash:,.0f}\n"
+            f"📦 持倉市值: {holding_value:,.0f}\n"
+            f"🏦 總資產: {total_value:,.0f}\n"
+            f"{'─'*28}\n"
+            f"今日實現損益: <b>{realized_pnl:+,.0f}</b> 元\n"
+            f"買入 {len(buys)} 筆  賣出 {len(sells)} 筆"
+            + (f"\n持倉:\n{pos_lines}" if pos_lines else "\n（無持倉）")
+        )
+
+        # 當沖紙上部分
+        day_summary = day_bot.get_summary()
+        day_holdings = day_summary.get("holdings", {})
+        day_pnl      = day_summary.get("daily_pnl", 0.0)
+        day_cash     = day_summary.get("cash", 0.0)
+        day_trades   = day_summary.get("trades_today", 0)
+        day_pos_lines = ""
+        for c, h in day_holdings.items():
+            name = STOCK_DB.get(c, c).split()[0]
+            day_pos_lines += f"  {c} {name} 未平倉\n"
+
+        day_msg = (
+            f"\n📄 <b>當沖紙上</b>\n"
+            f"{'─'*28}\n"
+            f"💵 現金: {day_cash:,.0f}\n"
+            f"今日損益: <b>{day_pnl:+,.0f}</b> 元\n"
+            f"成交: {day_trades} 筆"
+            + (f"\n持倉:\n{day_pos_lines}" if day_pos_lines else "\n（全部平倉）")
+        )
+
+        send(real_msg + day_msg, key=f"daily:{today}", cooldown=0)
+    except Exception as e:
+        logger.warning(f"Telegram 每日戰報發送失敗: {e}")
+
     # 自動 commit 績效報告至 git，供 cloud agent 每週分析
     try:
         import subprocess as _sp
@@ -322,6 +396,8 @@ def main():
     if bot.model.is_trained():
         bot.model.load()
         logger.info(f"已載入模型版本: {bot.model.version}")
+        # 隔日沖共用同一個日線 model
+        overnight_bot.set_model(bot.model)
     else:
         logger.warning("尚無訓練好的模型，建議先執行 run_backtest.py")
 
@@ -337,16 +413,29 @@ def main():
     # misfire_grace_time=60: 若 job 超過 60 秒才啟動則直接跳過，避免重啟後補跑過期 job
     GRACE = 60
 
-    # 每 2 分鐘 09:00~13:30 — 當沖盯盤 / 紙上交易
+    # 每 1 分鐘 09:00~13:30 — 當沖盯盤 / 紙上交易（1min K棒，更敏銳）
     scheduler.add_job(
         job_day_trader,
         CronTrigger(
-            minute="*/2",
+            minute="*",
             hour="9,10,11,12,13",
             day_of_week="mon-fri",
             timezone=TZ,
         ),
         id="day_trader", name="當沖盯盤",
+        max_instances=1, coalesce=True, misfire_grace_time=30,
+    )
+
+    # 每 2 分鐘 09:00~14:30 — 隔日沖（早盤出場 + 尾盤佈局）
+    scheduler.add_job(
+        job_overnight_trader,
+        CronTrigger(
+            minute="*/2",
+            hour="9,10,11,13,14",
+            day_of_week="mon-fri",
+            timezone=TZ,
+        ),
+        id="overnight_trader", name="隔日沖",
         max_instances=1, coalesce=True, misfire_grace_time=30,
     )
 
@@ -379,6 +468,19 @@ def main():
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
+    # 每15分鐘 09:25~13:05 — 日間補掃（抓盤中新機會；TA 有 8h 快取不會重複呼叫 LLM）
+    scheduler.add_job(
+        job_intraday_scan,
+        CronTrigger(
+            minute="*/15",
+            hour="9,10,11,12,13",
+            day_of_week="mon-fri",
+            timezone=TZ,
+        ),
+        id="intraday_scan", name="日間補掃",
+        max_instances=1, coalesce=True, misfire_grace_time=GRACE,
+    )
+
     # 13:20 — 收盤掃描（提前10分鐘，確保盤中零股來得及成交）
     scheduler.add_job(
         job_close_scan,
@@ -387,10 +489,10 @@ def main():
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
 
-    # 13:35 — 每日結算報告
+    # 13:32 — 每日結算報告（收盤後立即 Telegram 戰報）
     scheduler.add_job(
         job_daily_summary,
-        CronTrigger(hour=13, minute=35, day_of_week="mon-fri", timezone=TZ),
+        CronTrigger(hour=13, minute=32, day_of_week="mon-fri", timezone=TZ),
         id="daily_summary", name="每日結算",
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
     )
@@ -406,7 +508,9 @@ def main():
     logger.info("排程設定完成:")
     logger.info("  08:30        → 開盤前選股發現（社群掃描 + 三大法人）")
     logger.info("  09:10        → 開盤掃描選股")
-    logger.info("  每2分鐘      → 當沖盯盤 / 紙上交易 (09:00~13:30)")
+    logger.info("  每15分鐘     → 日間補掃（09:00~13:30，抓盤中新機會）")
+    logger.info("  每1分鐘      → 當沖盯盤 / 大量告警 / 紙上交易 (09:00~13:30)")
+    logger.info("  每2分鐘      → 隔日沖 早盤出場+尾盤佈局 (09:00~14:30)")
     logger.info("  每3分鐘      → 監控停損/停利 (09:00~13:30)")
     logger.info("  13:30        → 收盤最後掃描")
     logger.info("  14:35 (週一) → AI 週度重訓（walk-forward）")

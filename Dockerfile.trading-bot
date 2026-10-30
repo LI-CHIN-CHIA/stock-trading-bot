@@ -2,6 +2,11 @@ FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y \
     libssl-dev ca-certificates curl libgomp1 \
+    # playwright chromium dependencies
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libasound2 libpango-1.0-0 libpangocairo-1.0-0 \
+    fonts-liberation fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,7 +17,8 @@ COPY wheels/ wheels/
 RUN pip install --no-cache-dir \
     psycopg2-binary \
     wheels/fubon_neo-2.2.8-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
-    -r requirements-trading-bot.txt
+    -r requirements-trading-bot.txt \
+    && playwright install chromium
 
 # 複製原始碼
 COPY ai/               ai/
