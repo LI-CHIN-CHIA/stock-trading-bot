@@ -318,6 +318,7 @@ class OvernightTrader:
         if not self._state["holdings"]:
             return
         force = self._is_force_close_time()
+        today_str = str(date.today())
         for code in list(self._state["holdings"]):
             price = _current_price(code)
             if price is None:
@@ -330,7 +331,10 @@ class OvernightTrader:
                 self._paper_sell(code, price, f"跳空高開 +{gap:.1%}")
                 continue
 
-            if force:
+            # 強制平倉只套用在「昨天或更早買進」的部位
+            # 今天 14:00 剛買進的不能在 14:02 就被 ≥11:00 條件平倉
+            is_carry_over = h.get("entry_date", today_str) < today_str
+            if force and is_carry_over:
                 self._paper_sell(code, price, "強制平倉 11:00")
             elif price <= h["stop_loss"]:
                 self._paper_sell(code, price, f"停損 {h['stop_loss']:.2f}")
