@@ -6,6 +6,8 @@ metadata:
 data:
   PAPER_TRADING: "false"
   MODEL_TYPE: "double_ensemble"
+  DAY_REAL_TRADING: "false"
+  DAY_MAX_BUDGET: "50000"
   ENABLE_TRADING_AGENTS: "true"
   TA_DEEP_MODEL: "qwen3:32b"
   TA_QUICK_MODEL: "qwen3:8b"

@@ -60,6 +60,10 @@ _COMMISSION_RATE = 0.001425   # 券商手續費 0.1425%（可折扣）
 _STT_RATE        = 0.0015     # 證交稅 0.15%（當沖減半）
 _MIN_FEE         = 20         # 最低手續費 20 元
 
+# 真實下單旗標
+DAY_REAL_TRADING = os.getenv("DAY_REAL_TRADING", "false").lower() == "true"
+DAY_MAX_BUDGET   = float(os.getenv("DAY_MAX_BUDGET", "50000"))  # 單筆最高金額 NTD
+
 # 量能門檻：近20根1min K 均量至少 15,000 股（≈日均3000張@1min），進場那根至少均量 80%
 DAY_MIN_AVG_VOLUME    = int(os.getenv("DAY_MIN_AVG_VOLUME",    "15000"))
 DAY_MIN_ENTRY_VOL_PCT = float(os.getenv("DAY_MIN_ENTRY_VOL_PCT", "0.8"))
@@ -257,14 +261,33 @@ class DayTrader:
     """當沖紙上交易，每 1 分鐘 run_cycle() 一次；持倉時背景執行緒每 10 秒盯盤。"""
 
     def __init__(self):
-        self._lock         = threading.RLock()  # RLock 允許同執行緒重入（run_cycle → _paper_sell）
+        self._lock         = threading.RLock()
         self._state        = self._load_state()
         self._model        = self._load_model()
         self._monitor_stop = threading.Event()
         self._monitor_thr: threading.Thread | None = None
+        # 真實下單 SDK 注入（預設為 None，即純紙上模式）
+        self._place_order_fn:  object = None   # callable(code, side, shares, price) -> order_no|None
+        self._check_filled_fn: object = None   # callable(code, order_no) -> int  0=pending -1=rejected N=filled
+        self._cancel_order_fn: object = None   # callable(code, order_no)
+        self._pending_buy_orders:  dict = {}   # order_no -> {code, shares, price, reserved_cash, analysis, predicted_gain, placed_at}
+        self._pending_sell_orders: dict = {}   # order_no -> {code, shares, price, reason, placed_at}
         # 若啟動時已有持倉（跨週期 reload），立即啟動背景監控
         if self._state.get("holdings"):
             self._start_fast_monitor()
+
+    # ── SDK 注入（真實下單）─────────────────────────────────────────────────────
+
+    def set_real_trading(self, place_order_fn, check_filled_fn, cancel_order_fn=None):
+        """
+        注入 TradingBot 的下單 / 查詢成交 / 取消委託函式。
+        呼叫後若 DAY_REAL_TRADING=true，買賣將透過 Fubon SDK 執行。
+        """
+        self._place_order_fn  = place_order_fn
+        self._check_filled_fn = check_filled_fn
+        self._cancel_order_fn = cancel_order_fn
+        mode = "真實下單" if DAY_REAL_TRADING else "紙上（DAY_REAL_TRADING=false）"
+        logger.info(f"[DayTrader] set_real_trading 完成，模式={mode}  單筆上限={DAY_MAX_BUDGET:,.0f}")
 
     # ── 10 秒背景盯盤 ─────────────────────────────────────────────────────────
 
@@ -438,10 +461,14 @@ class DayTrader:
         holdings = self._state["holdings"]
         if code in holdings:
             return False
+        # 也排除正在等待成交的買單（避免重複下單）
+        if any(o["code"] == code and o["side"] == "BUY" for o in self._pending_buy_orders.values()):
+            return False
         if len(holdings) >= DAY_MAX_POSITIONS:
             return False
 
-        budget  = self._state["cash"] * DAY_PER_TRADE_PCT
+        # 單筆預算：資金比例 與 DAY_MAX_BUDGET 取較小值
+        budget  = min(self._state["cash"] * DAY_PER_TRADE_PCT, DAY_MAX_BUDGET)
         # 先嘗試整張（1000股倍數），不足1張才買零股
         shares = int(budget // (price * 1000)) * 1000
         if shares <= 0:
@@ -453,6 +480,25 @@ class DayTrader:
         total_cost = cost + buy_fee
         if total_cost > self._state["cash"]:
             return False
+
+        # 真實下單路徑（非阻塞，等待下次 _confirm_pending_orders 確認成交）
+        if DAY_REAL_TRADING and self._place_order_fn is not None:
+            order_no = self._place_order_fn(code, "BUY", shares, price)
+            if not order_no:
+                logger.warning(f"[DayTrader] ❌ {code} 真實買單送出失敗")
+                return False
+            # 預扣資金，成交後才建倉；若失敗/超時則退款
+            self._state["cash"] -= total_cost
+            self._pending_buy_orders[order_no] = {
+                "side": "BUY", "code": code, "shares": shares, "price": price,
+                "reserved_cash": total_cost, "analysis": analysis,
+                "predicted_gain": predicted_gain, "placed_at": time.time(),
+            }
+            logger.info(
+                f"[DayTrader] ⏳ 真實買單送出 {code} {shares}股 @{price:.2f}"
+                f"  上限={DAY_MAX_BUDGET:,.0f}  單號={order_no}"
+            )
+            return True
 
         self._state["cash"] -= total_cost
         holdings[code] = {
@@ -489,6 +535,33 @@ class DayTrader:
         holdings = self._state["holdings"]
         if code not in holdings:
             return 0.0
+        # 已有進行中的賣單（避免重複下單）
+        if any(o["code"] == code and o["side"] == "SELL" for o in self._pending_sell_orders.values()):
+            return 0.0
+
+        h = holdings[code]
+
+        # 真實下單路徑（非阻塞：先標記 pending，成交後由 _confirm_pending_orders 更新狀態）
+        if DAY_REAL_TRADING and self._place_order_fn is not None:
+            shares = h["shares"]
+            order_no = self._place_order_fn(code, "SELL", shares, price)
+            if not order_no:
+                logger.warning(f"[DayTrader] ❌ {code} 真實賣單送出失敗，改紙上結算")
+                # fallthrough 到紙上邏輯
+            else:
+                # 從 holdings 移除（防止 fast monitor 觸發重複賣單），記錄 pending
+                holdings.pop(code)
+                self._pending_sell_orders[order_no] = {
+                    "side": "SELL", "code": code, "shares": shares, "price": price,
+                    "cost": h["cost"], "reason": reason, "placed_at": time.time(),
+                    "retries": 0,
+                }
+                logger.info(
+                    f"[DayTrader] ⏳ 真實賣單送出 {code} {shares}股 @{price:.2f}"
+                    f"  原因={reason}  單號={order_no}"
+                )
+                return 0.0   # 損益等成交後計算
+
         h       = holdings.pop(code)
         shares  = h["shares"]
         cost    = h["cost"]
@@ -528,6 +601,136 @@ class DayTrader:
             "predicted_gain":  round(predicted_gain * 100, 3) if predicted_gain is not None else None,
         }
         self._state["trade_log"].append(entry)
+
+    # ── 真實委託確認 ──────────────────────────────────────────────────────────
+
+    def _confirm_pending_orders(self):
+        """
+        查詢 pending 買/賣單是否成交（每 run_cycle 呼叫一次，在鎖外執行 API）。
+        成交 → 更新 holdings/cash/pnl；超時 60s → 取消重試（賣單最多 1 次）；
+        超時 120s 仍未成交 → 賣單紙上強制結算（確保 T+0）。
+        """
+        if not self._check_filled_fn:
+            return
+
+        # ── 買單確認 ──────────────────────────────────────────────────────────
+        buy_done = []
+        for order_no, o in list(self._pending_buy_orders.items()):
+            filled = self._check_filled_fn(o["code"], order_no)
+            if filled > 0:
+                # 已成交：建立持倉（以實際成交股數為準）
+                price = o["price"]
+                cost  = filled * price
+                fee   = max(_MIN_FEE, round(cost * _COMMISSION_RATE))
+                total = cost + fee
+                # 若實際股數 < 預扣，退還差額
+                refund = o["reserved_cash"] - total
+                with self._lock:
+                    if refund > 0:
+                        self._state["cash"] += refund
+                    self._state["holdings"][o["code"]] = {
+                        "shares":         filled,
+                        "entry_price":    price,
+                        "entry_time":     self._now_tw().strftime("%H:%M"),
+                        "cost":           total,
+                        "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
+                        "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                        "predicted_gain": round(o["predicted_gain"] * 100, 3) if o.get("predicted_gain") else None,
+                    }
+                    self._log_trade(o["code"], "BUY", filled, price, "當沖買入(真實)", o.get("analysis") or {}, o.get("predicted_gain"))
+                logger.info(f"[DayTrader] ✅ 買入確認 {o['code']} {filled}股 @{price:.2f}")
+                self._start_fast_monitor()
+                buy_done.append(order_no)
+            elif filled == -1:
+                # 被拒：退還預扣資金
+                with self._lock:
+                    self._state["cash"] += o["reserved_cash"]
+                logger.warning(f"[DayTrader] ❌ 買單被拒 {o['code']} {order_no}，已退款")
+                buy_done.append(order_no)
+            elif time.time() - o["placed_at"] > 120:
+                # 2 分鐘無成交：取消並退款
+                if self._cancel_order_fn:
+                    self._cancel_order_fn(o["code"], order_no)
+                with self._lock:
+                    self._state["cash"] += o["reserved_cash"]
+                logger.warning(f"[DayTrader] ⏰ 買單超時取消 {o['code']} {order_no}")
+                buy_done.append(order_no)
+        for no in buy_done:
+            del self._pending_buy_orders[no]
+
+        # ── 賣單確認 ──────────────────────────────────────────────────────────
+        sell_done = []
+        for order_no, o in list(self._pending_sell_orders.items()):
+            filled = self._check_filled_fn(o["code"], order_no)
+            if filled > 0:
+                price = o["price"]
+                proceeds = filled * price
+                fee  = max(_MIN_FEE, round(proceeds * _COMMISSION_RATE))
+                stt  = round(proceeds * _STT_RATE)
+                net  = proceeds - fee - stt
+                pnl  = net - o["cost"]
+                with self._lock:
+                    self._state["cash"]      += net
+                    self._state["daily_pnl"] += pnl
+                    self._log_trade(o["code"], "SELL", filled, price, o["reason"], {})
+                emoji = "🟩" if pnl >= 0 else "🟥"
+                logger.info(
+                    f"[DayTrader] {emoji} 賣出確認 {o['code']} {filled}股 @{price:.2f}"
+                    f"  手續費={fee+stt:,.0f}  損益={pnl:+,.0f} TWD"
+                )
+                try:
+                    from utils.telegram_notify import notify_sell
+                    notify_sell("當沖", o["code"], filled, price, pnl, o["reason"])
+                except Exception:
+                    pass
+                sell_done.append(order_no)
+            elif filled == -1:
+                logger.warning(f"[DayTrader] ❌ 賣單被拒 {o['code']} {order_no}，重試")
+                sell_done.append(order_no)
+                # 重新放回 holdings，讓下一次 _check_holdings 觸發再賣
+                with self._lock:
+                    if o["code"] not in self._state["holdings"]:
+                        self._state["holdings"][o["code"]] = {
+                            "shares": o["shares"], "entry_price": o["price"],
+                            "entry_time": "??:??", "cost": o["cost"],
+                            "stop_loss":   round(o["price"] * (1 + DAY_STOP_LOSS_PCT), 2),
+                            "take_profit": round(o["price"] * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                        }
+            elif time.time() - o["placed_at"] > 60 and o.get("retries", 0) == 0:
+                # 60s 未成交：取消 + 以新價重試一次
+                if self._cancel_order_fn:
+                    self._cancel_order_fn(o["code"], order_no)
+                df = _fetch_intraday(o["code"])
+                new_price = float(df["Close"].iloc[-1]) if df is not None else o["price"]
+                new_no = self._place_order_fn(o["code"], "SELL", o["shares"], new_price) if self._place_order_fn else None
+                if new_no:
+                    o2 = dict(o, price=new_price, placed_at=time.time(), retries=1)
+                    self._pending_sell_orders[new_no] = o2
+                    logger.warning(f"[DayTrader] ⚠️ 賣單超時重試 {o['code']} @{new_price:.2f} 新單號={new_no}")
+                else:
+                    # 最後手段：紙上強制結算（確保 T+0）
+                    pnl_est = (new_price - o["price"]) * o["shares"]
+                    with self._lock:
+                        self._state["cash"]      += o["shares"] * new_price
+                        self._state["daily_pnl"] += pnl_est
+                        self._log_trade(o["code"], "SELL", o["shares"], new_price, f"{o['reason']}(強制紙上)", {})
+                    logger.error(
+                        f"[DayTrader] ❌ {o['code']} 賣單重試失敗，紙上強制結算 @{new_price:.2f}"
+                    )
+                sell_done.append(order_no)
+            elif time.time() - o["placed_at"] > 120 and o.get("retries", 0) >= 1:
+                # 第二次也超時：紙上強制結算
+                df = _fetch_intraday(o["code"])
+                fp = float(df["Close"].iloc[-1]) if df is not None else o["price"]
+                pnl_est = (fp - o["price"]) * o["shares"]
+                with self._lock:
+                    self._state["cash"]      += o["shares"] * fp
+                    self._state["daily_pnl"] += pnl_est
+                    self._log_trade(o["code"], "SELL", o["shares"], fp, f"{o['reason']}(強制紙上)", {})
+                logger.error(f"[DayTrader] ❌ {o['code']} 賣單兩次超時，紙上強制結算 @{fp:.2f}")
+                sell_done.append(order_no)
+        for no in sell_done:
+            del self._pending_sell_orders[no]
 
     # ── 持倉檢查 ─────────────────────────────────────────────────────────────
 
@@ -697,6 +900,7 @@ class DayTrader:
         self._alert_volume_surges()
 
         if ENABLE_DAY_TRADING:
+            self._confirm_pending_orders()   # 先確認上一輪的真實委託是否成交
             self._check_holdings()
             self._scan_entries()
             self._log_portfolio_status()

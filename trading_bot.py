@@ -405,6 +405,12 @@ def main():
     if not paper:
         if bot.login():
             logger.info("✅ 富邦實盤登入成功（啟動時）")
+            # 注入 SDK 給 DayTrader，讓當沖可選擇真實下單
+            day_bot.set_real_trading(
+                place_order_fn  = bot._place_order,
+                check_filled_fn = bot._check_filled,
+                cancel_order_fn = bot._cancel_order,
+            )
         else:
             logger.error("❌ 富邦實盤登入失敗，監控仍會執行但委託需等 09:10 重新登入")
 
