@@ -140,7 +140,7 @@ def job_open_scan():
     # ── 夜盤方向門控 ──────────────────────────────────────────────────────
     _thresh_orig: float | None = None
     try:
-        from data.night_futures import night_gate_ok
+        from utils.night_futures import night_gate_ok
         import ai.model as _ai_model
         gate_open, extra_thresh = night_gate_ok()
         if not gate_open:

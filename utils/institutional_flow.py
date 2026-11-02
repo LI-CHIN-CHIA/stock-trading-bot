@@ -31,14 +31,18 @@ def get_institutional_today(date_str: str = "") -> dict[str, dict]:
         if date_str in _cache:
             return _cache[date_str]
 
-    data = _fetch_twse_institutional(date_str)
+    try:
+        data = _fetch_twse_institutional(date_str)
+    except Exception as e:
+        logger.warning(f"三大法人資料來源失敗，不快取: {e}")
+        return {}
 
     with _cache_lock:
-        _cache[date_str] = data
-        # 只保留最近 5 個交易日
-        if len(_cache) > 5:
-            oldest = sorted(_cache)[0]
-            del _cache[oldest]
+        if data:  # 空字典代表盤前尚未公布，不快取讓下次重試
+            _cache[date_str] = data
+            if len(_cache) > 5:
+                oldest = sorted(_cache)[0]
+                del _cache[oldest]
 
     return data
 

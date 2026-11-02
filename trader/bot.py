@@ -188,7 +188,7 @@ class TradingBot:
         """
         # ── 5. 減資過濾（最優先，不依賴 snap）─────────────────────────────────
         try:
-            from data.corp_events import get_event_flags
+            from utils.corp_events import get_event_flags
             ev = get_event_flags(code)
             if ev.get("capital_reduction_flag"):
                 logger.info(f"⚠️  {code} 進場品質: 近期有減資事件，禁止買入")
@@ -213,7 +213,11 @@ class TradingBot:
             logger.info(f"⚠️  {code} 進場品質: 成交量萎縮 {volume_ratio:.1f}x，跳過")
             return False
 
-        foreign_ok = is_foreign_buying(code)
+        try:
+            foreign_ok = is_foreign_buying(code)
+        except Exception as e:
+            logger.warning(f"⚠️ {code} 三大法人資料查詢失敗（放行）: {e}")
+            foreign_ok = None
         if foreign_ok is False:
             logger.info(f"⚠️  {code} 進場品質: 外資今日淨賣超，跳過")
             return False
@@ -251,6 +255,22 @@ class TradingBot:
         except Exception as e:
             logger.error(f"❌ SDK 錯誤: {e}")
             return False
+
+    def _call_with_relogin(self, call):
+        """
+        Execute a zero-arg callable against the Fubon SDK.
+        If the result contains "Not Login" (session expired mid-day),
+        re-login once and retry. `call` must be a lambda so it reads
+        self.sdk at call time — self.sdk is replaced on re-login.
+        """
+        result = call()
+        if not result.is_success and "Not Login" in (result.message or ""):
+            logger.warning("⚠️ Fubon session 過期，自動重新登入...")
+            if self._login():
+                result = call()
+            else:
+                logger.error("❌ 重新登入失敗")
+        return result
 
     def _on_filled(self, data) -> None:
         """
@@ -621,7 +641,7 @@ class TradingBot:
 
             # ── 0. 減資特別停損：-15% 固定停損（早於其他條件判斷）──────────────
             try:
-                from data.corp_events import get_event_flags
+                from utils.corp_events import get_event_flags
                 if get_event_flags(code).get("capital_reduction_flag"):
                     if pct_pnl <= -0.15:
                         reason = f"減資保護停損 {pct_pnl:.1%} (-15%上限)"
@@ -1403,7 +1423,7 @@ class TradingBot:
         status=90 means rejected; status=0 with filled_qty=0 means still pending.
         """
         try:
-            result = self.sdk.stock.get_order_results(self.account)
+            result = self._call_with_relogin(lambda: self.sdk.stock.get_order_results(self.account))
             if not result.is_success or not result.data:
                 return 0
             for o in result.data:
@@ -1438,9 +1458,13 @@ class TradingBot:
             return  # paper mode 直接使用本地持倉記錄
         try:
             # ── 1. 雙向持倉同步 ───────────────────────────────────────────
-            inv = self.sdk.accounting.inventories(self.account)
+            inv = self._call_with_relogin(lambda: self.sdk.accounting.inventories(self.account))
+            if not inv.is_success:
+                # 查詢失敗時絕對不能用空字典繼續，否則會把所有真實持倉誤刪
+                logger.warning("⚠️ 持倉同步取消：inventories() 查詢失敗，保留本地持倉")
+                return
             real_holdings: dict[str, int] = {}   # code -> qty
-            if inv.is_success and inv.data:
+            if inv.data:
                 for item in inv.data:
                     code = str(getattr(item, "stock_no", None) or getattr(item, "symbol", None) or "").strip()
                     # 零股數量在 odd 欄位
@@ -1512,7 +1536,7 @@ class TradingBot:
                 stale_pending.append(no)
 
             # ── 3. 清除已被拒絕的掛單 ─────────────────────────────────────
-            result = self.sdk.stock.get_order_results(self.account)
+            result = self._call_with_relogin(lambda: self.sdk.stock.get_order_results(self.account))
             if result.is_success and result.data:
                 rejected = {
                     getattr(o, "seq_no", None)
