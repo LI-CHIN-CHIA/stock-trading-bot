@@ -38,6 +38,19 @@ class UserConfig(Base):
     user: Mapped["User"] = relationship("User", back_populates="config")
 
 
+class Signal(Base):
+    __tablename__ = "platform_signals"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True)
+    code:       Mapped[str]      = mapped_column(String(10))
+    action:     Mapped[str]      = mapped_column(String(10))   # BUY / SELL / SHORT / COVER
+    score:      Mapped[int]      = mapped_column(Integer, default=0)
+    price:      Mapped[float]    = mapped_column(Float)
+    reason:     Mapped[str]      = mapped_column(String(200), default="")
+    signal_date:Mapped[str]      = mapped_column(String(10))   # YYYY-MM-DD
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Trade(Base):
     __tablename__ = "platform_trades"
 

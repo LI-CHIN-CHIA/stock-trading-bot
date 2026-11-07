@@ -1,16 +1,16 @@
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     display_name: str = ""
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
 class TokenResponse(BaseModel):
@@ -71,6 +71,30 @@ class TradeOut(BaseModel):
     reason: str
     order_no: str
     is_real: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Signals ──────────────────────────────────────────────────────────────────
+
+class SignalIn(BaseModel):
+    code: str
+    action: str        # BUY / SELL / SHORT / COVER
+    score: int = 0
+    price: float
+    reason: str = ""
+    signal_date: str = ""
+
+class SignalOut(BaseModel):
+    id: int
+    code: str
+    action: str
+    score: int
+    price: float
+    reason: str
+    signal_date: str
     created_at: datetime
 
     class Config:

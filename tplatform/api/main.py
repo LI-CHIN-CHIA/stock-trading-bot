@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routes import auth, config, trades, ws
+from .routes import auth, config, trades, signals, ws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -29,6 +29,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(config.router)
 app.include_router(trades.router)
+app.include_router(signals.router)
 app.include_router(ws.router)
 
 
