@@ -1470,6 +1470,13 @@ class DayTrader:
                 + f"  @{price:.2f}"
             )
             self._paper_buy(code, price, analysis, predicted_gain)
+            try:
+                from utils.platform_signal import broadcast as _bcast
+                reason = (f"score={score} delta={analysis.get('vol_delta_signal')}"
+                          + (f" model={predicted_gain*100:.2f}%" if predicted_gain else ""))
+                _bcast(code, "BUY", score, price, reason)
+            except Exception:
+                pass
 
         # ── 真實空方進場 ──────────────────────────────────────────────────────
         if ENABLE_SHORT_TRADING:
@@ -1486,6 +1493,12 @@ class DayTrader:
                     f"  @{price:.2f}"
                 )
                 self._paper_short(code, price, analysis)
+                try:
+                    from utils.platform_signal import broadcast as _bcast
+                    reason = f"score={score} delta={analysis.get('vol_delta_signal')} 反沖空頭"
+                    _bcast(code, "SHORT", score, price, reason)
+                except Exception:
+                    pass
 
         # ── 影子帳戶獨立進場（不依賴真實帳戶，所有資本層同時嘗試）──────────
         if DAY_REAL_TRADING:
