@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: trading
+data:
+  PLATFORM_DB_HOST: "postgres"
+  PLATFORM_DB_PORT: "5432"
+  PLATFORM_DB_NAME: "trading"
