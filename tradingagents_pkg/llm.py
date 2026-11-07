@@ -13,27 +13,33 @@ visible union of what the project actually supports, instead of leaning on
 
 from typing import Any, Literal, cast
 
-from langchain_xai import ChatXAI
 from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
-from langchain_litellm import ChatLiteLLM
-from langchain_anthropic import ChatAnthropic
-from langchain_openrouter import ChatOpenRouter
-from langchain.chat_models import init_chat_model
-from langchain_huggingface import ChatHuggingFace
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models.chat_models import BaseChatModel
 
-type ChatModel = (
-    ChatOpenAI
-    | ChatAnthropic
-    | ChatGoogleGenerativeAI
-    | ChatXAI
-    | ChatHuggingFace
-    | ChatOpenRouter
-    | ChatOllama
-    | ChatLiteLLM
-)
+# Optional providers — imported lazily to avoid hard dependency errors
+def _try_import(module: str, cls: str):
+    try:
+        import importlib
+        return getattr(importlib.import_module(module), cls)
+    except Exception:
+        return None
+
+ChatXAI            = _try_import("langchain_xai",         "ChatXAI")
+ChatOpenAI         = _try_import("langchain_openai",       "ChatOpenAI")
+ChatLiteLLM        = _try_import("langchain_litellm",      "ChatLiteLLM")
+ChatAnthropic      = _try_import("langchain_anthropic",    "ChatAnthropic")
+ChatOpenRouter     = _try_import("langchain_openrouter",   "ChatOpenRouter")
+ChatHuggingFace    = _try_import("langchain_huggingface",  "ChatHuggingFace")
+ChatGoogleGenAI    = _try_import("langchain_google_genai", "ChatGoogleGenerativeAI")
+ChatGoogleGenerativeAI = ChatGoogleGenAI
+
+try:
+    from langchain.chat_models import init_chat_model as _init_chat_model
+except Exception:
+    _init_chat_model = None
+
+ChatModel = BaseChatModel
 
 LLMProvider = Literal[
     "openai", "anthropic", "google_genai", "xai", "huggingface", "openrouter", "ollama", "litellm"
@@ -42,37 +48,25 @@ LLMProvider = Literal[
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
-class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
-    """Flatten Gemini 3 list-content responses to a plain string.
+if ChatGoogleGenAI is not None:
+    class NormalizedChatGoogleGenerativeAI(ChatGoogleGenAI):
+        """Flatten Gemini 3 list-content responses to a plain string."""
 
-    Gemini 3 returns `message.content` as `[{'type': 'text', 'text': '...'}]`;
-    downstream prompt concatenation expects plain strings.
-    """
-
-    def invoke(self, prompt_input: object, config: object = None, **kwargs: object) -> object:
-        """Invoke the chat model and normalize the response content.
-
-        Args:
-            prompt_input (object): The input prompt for the chat model.
-            config (object | None, optional): Configuration for the invocation.
-                Defaults to None.
-            **kwargs (object): Additional keyword arguments.
-
-        Returns:
-            object: The chat response object with normalized string content.
-        """
-        response = super().invoke(prompt_input, config, **kwargs)
-        content = response.content
-        if isinstance(content, list):
-            response.content = "\n".join(
-                item["text"]
-                if isinstance(item, dict) and item.get("type") == "text"
-                else item
-                if isinstance(item, str)
-                else ""
-                for item in content
-            ).strip()
-        return response
+        def invoke(self, prompt_input: object, config: object = None, **kwargs: object) -> object:
+            response = super().invoke(prompt_input, config, **kwargs)
+            content = response.content
+            if isinstance(content, list):
+                response.content = "\n".join(
+                    item["text"]
+                    if isinstance(item, dict) and item.get("type") == "text"
+                    else item
+                    if isinstance(item, str)
+                    else ""
+                    for item in content
+                ).strip()
+            return response
+else:
+    NormalizedChatGoogleGenerativeAI = None
 
 
 def build_chat_model(
@@ -109,10 +103,19 @@ def build_chat_model(
         _apply_reasoning(provider, reasoning_effort, kwargs)
 
     model_lower = model.lower()
-    if "gemini" in model_lower or "google" in model_lower:
+    if ("gemini" in model_lower or "google" in model_lower) and NormalizedChatGoogleGenerativeAI is not None:
         return NormalizedChatGoogleGenerativeAI(model=model, **kwargs)
 
-    return cast("ChatModel", init_chat_model(model, model_provider=provider, **kwargs))
+    # Ollama: bypass init_chat_model and construct directly so we can cap token generation.
+    # qwen3 extended-thinking mode generates 100k+ tokens without a num_predict limit.
+    if provider == "ollama":
+        import os
+        host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        return ChatOllama(model=model, base_url=host, num_predict=4096, **kwargs)
+
+    if _init_chat_model is None:
+        raise ImportError(f"langchain init_chat_model not available for provider={provider}")
+    return cast("ChatModel", _init_chat_model(model, model_provider=provider, **kwargs))
 
 
 def _apply_reasoning(

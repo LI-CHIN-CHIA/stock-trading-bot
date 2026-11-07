@@ -1143,22 +1143,31 @@ class TradingBot:
             return round(math.floor(price / tick) * tick, 2)
         return round(round(price / tick) * tick, 2)
 
-    def _ai_limit_price(self, code: str, side: str, base_price: float, proba: float = 0.0) -> float:
+    def _ai_limit_price(self, code: str, side: str, base_price: float, proba: float = 0.0,
+                        odd_lot: bool = True) -> float:
         """
-        BUY: 使用接近漲停板價（+9.8%，向下取整），確保盤中零股撮合成交。
-             零股是逐筆撮合，出高限價代表「願意接受任何低於此價的成交」，
-             實際成交價是當下市場賣價，不會真的用限價買進。
-             向下取整避免因當下市價≠昨收而超過交易所漲停板上限。
+        BUY 零股: 使用接近漲停板價（+9.8%，向下取整），確保盤中逐筆撮合成交。
+        BUY 整股: 僅加 1 tick，避免超過交易所漲停板上限導致「單價輸入錯誤」。
         SELL: 依 AI 信心決定折讓幅度。
-        所有價格均對齊台股最小跳動單位，避免「單價輸入錯誤」。
+        所有價格均對齊台股最小跳動單位。
         """
         if side == "BUY":
-            limit_price = self._tick_round(base_price * 1.098, floor=True)
-            logger.info(f"AI限價: {code} BUY base={base_price} proba={proba:.0%} → {limit_price} (接近漲停，確保成交)")
+            if odd_lot:
+                limit_price = self._tick_round(base_price * 1.098, floor=True)
+                logger.info(f"AI限價: {code} BUY(零股) base={base_price} proba={proba:.0%} → {limit_price} (接近漲停，確保成交)")
+            else:
+                # 整股下單：+1 tick 確保優先成交，不超過漲停板
+                limit_price = self._tick_round(base_price, floor=False)
+                tick = 0.01 if base_price < 10 else 0.05 if base_price < 50 else 0.10 if base_price < 100 else 0.50 if base_price < 500 else 1.00
+                limit_price = round(limit_price + tick, 2)
+                logger.info(f"AI限價: {code} BUY(整股) base={base_price} proba={proba:.0%} → {limit_price} (+1 tick)")
         else:  # SELL
             offset = 0.99 if proba >= 0.70 else 0.98
-            limit_price = self._tick_round(base_price * offset)
-            logger.info(f"AI限價: {code} SELL base={base_price} proba={proba:.0%} → {limit_price} (offset={offset})")
+            # 跌停板保護：sell price 不得低於 base_price × 0.901（≈跌停+1 tick）
+            # 避免折讓後跌破當日漲跌停範圍導致富邦「單價輸入錯誤」
+            lower_floor = self._tick_round(base_price * 0.901)
+            limit_price = max(self._tick_round(base_price * offset), lower_floor)
+            logger.info(f"AI限價: {code} SELL base={base_price} proba={proba:.0%} → {limit_price} (offset={offset}, floor={lower_floor})")
         return limit_price
 
     def _is_market_open(self) -> bool:
@@ -1180,12 +1189,15 @@ class TradingBot:
 
         from fubon_neo.sdk import Order
         from fubon_neo.constant import BSAction, MarketType, OrderType, PriceType, TimeInForce
-        # 興櫃用 Emg / EmgOdd，一般股票用零股市場
+        # 整股（1000 的倍數）用一般市場；其餘用零股市場；興櫃另走 Emg
+        is_odd_lot = (shares % 1000 != 0)
         if code in EMERGING_TRADEABLE:
             market_type = MarketType.Emg
-        else:
+        elif is_odd_lot:
             market_type = self._odd_market_type()
-        limit_price = self._ai_limit_price(code, side, price, proba)
+        else:
+            market_type = MarketType.Common
+        limit_price = self._ai_limit_price(code, side, price, proba, odd_lot=is_odd_lot)
         if side == "BUY":
             bs = BSAction.Buy
         else:
@@ -1302,7 +1314,8 @@ class TradingBot:
             placed_at = datetime.fromisoformat(o["placed_at"])
             elapsed_min = int((now - placed_at).total_seconds() // 60)
 
-            filled = self._check_filled(code, order_no)
+            filled, fill_price = self._check_filled(code, order_no)
+            actual_price = fill_price if fill_price > 0 else o["price"]
 
             if filled == -1:
                 # Order rejected by broker
@@ -1318,29 +1331,29 @@ class TradingBot:
                         logger.info(f"⚡ {code} {order_no} 已由 _on_filled 處理，跳過重複入帳")
                         continue
                     if o["side"] == "BUY":
-                        actual_cost = buy_cost(filled, o["price"])
+                        actual_cost = buy_cost(filled, actual_price)
                         self.cash -= actual_cost
                         self.holdings[code] = {
-                            "shares": filled, "entry_price": o["price"],
+                            "shares": filled, "entry_price": actual_price,
                             "entry_date": now.strftime("%Y-%m-%d"),
                             "cost": actual_cost, "buy_proba": 0,
                         }
                         self.trade_log.append({
                             "date": now.strftime("%Y-%m-%d"), "action": "BUY",
-                            "ticker": code, "shares": filled, "price": o["price"],
+                            "ticker": code, "shares": filled, "price": actual_price,
                         })
-                        logger.info(f"✅ 掛單成交(BUY): {code} {filled}股 @ {o['price']}")
+                        logger.info(f"✅ 掛單成交(BUY): {code} {filled}股 @ {actual_price}")
                     else:
-                        proceeds = sell_proceeds(filled, o["price"])
+                        proceeds = sell_proceeds(filled, actual_price)
                         self.cash += proceeds
                         if code in self.holdings:
                             del self.holdings[code]
                         self.trade_log.append({
                             "date": now.strftime("%Y-%m-%d"), "action": "SELL",
-                            "ticker": code, "shares": filled, "price": o["price"],
+                            "ticker": code, "shares": filled, "price": actual_price,
                             "reason": o["reason"],
                         })
-                        logger.info(f"✅ 掛單成交(SELL): {code} {filled}股 @ {o['price']}")
+                        logger.info(f"✅ 掛單成交(SELL): {code} {filled}股 @ {actual_price}")
                     # 在鎖內移除，防止 _on_filled 在鎖釋放前重複處理同一筆委託
                     self.pending_orders.pop(order_no, None)
                 to_remove.append(order_no)
@@ -1417,36 +1430,38 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"取消委託錯誤: {e}")
 
-    def _check_filled(self, code: str, order_no: str | None) -> int:
+    def _check_filled(self, code: str, order_no: str | None) -> tuple[int, float]:
         """
-        Query get_order_results and return filled shares for this order (0 if none).
-        status=90 means rejected; status=0 with filled_qty=0 means still pending.
+        Query get_order_results and return (filled_qty, filled_price).
+        filled_qty = 0  → still pending
+        filled_qty = -1 → rejected
+        filled_qty > 0  → filled at filled_price (actual match price, NOT limit price)
         """
         try:
             result = self._call_with_relogin(lambda: self.sdk.stock.get_order_results(self.account))
             if not result.is_success or not result.data:
-                return 0
+                return (0, 0.0)
             for o in result.data:
-                o_no   = getattr(o, "seq_no", None)   # Fubon uses seq_no, not order_no
-                o_code = getattr(o, "stock_no", "")
-                o_qty  = int(getattr(o, "filled_qty", 0) or 0)
+                o_no     = getattr(o, "seq_no", None)
+                o_code   = getattr(o, "stock_no", "")
+                o_qty    = int(getattr(o, "filled_qty", 0) or 0)
+                o_price  = float(getattr(o, "filled_price", 0) or getattr(o, "price", 0) or 0)
                 o_status = getattr(o, "status", None)
-                o_err  = getattr(o, "error_message", None)
+                o_err    = getattr(o, "error_message", None)
 
-                # rejected order → signal caller to remove from pending
                 if o_status == 90 or (o_err and o_err.strip()):
                     if order_no and o_no == order_no:
                         logger.warning(f"委託被拒 {code} 序號={order_no}: {o_err}")
-                        return -1   # signal: rejected
+                        return (-1, 0.0)
                     continue
 
                 if order_no and o_no == order_no:
-                    return o_qty
+                    return (o_qty, o_price)
                 if not order_no and o_code == code and o_qty > 0:
-                    return o_qty
+                    return (o_qty, o_price)
         except Exception as e:
             logger.warning(f"成交確認查詢失敗: {e}")
-        return 0
+        return (0, 0.0)
 
     def _sync_holdings_from_fubon(self):
         """

@@ -95,6 +95,57 @@ def _build_random_forest(X_train, y_train, X_val, y_val, sample_weight):
     return clf, predict_fn
 
 
+def _build_double_ensemble(X_train, y_train, X_val, y_val, sample_weight, n_models=5):
+    """
+    DoubleEnsemble: N 個 LightGBM，各用 80% 隨機特徵子集，
+    並以預測難易度動態調整樣本權重（難例加權）。
+    受 Microsoft Qlib DoubleEnsemble 啟發。
+    """
+    import lightgbm as lgb
+    n_features  = X_train.shape[1]
+    keep        = max(int(n_features * 0.8), 10)
+    all_boosters: list = []
+    all_masks:   list  = []
+    weights = sample_weight.copy()
+
+    for i in range(n_models):
+        rng      = np.random.RandomState(42 + i * 7)
+        feat_idx = sorted(rng.choice(n_features, size=keep, replace=False).tolist())
+        all_masks.append(feat_idx)
+
+        X_tr = X_train.iloc[:, feat_idx]
+        X_v  = X_val.iloc[:, feat_idx]
+        train_set = lgb.Dataset(X_tr, label=y_train, weight=weights)
+        val_set   = lgb.Dataset(X_v,  label=y_val,  reference=train_set)
+
+        params = {
+            "objective": "multiclass", "num_class": 3,
+            "num_leaves": 63, "max_depth": 6, "learning_rate": 0.05,
+            "min_child_samples": 20, "subsample": 0.8,
+            "colsample_bytree": 0.8, "verbose": -1, "seed": 42 + i,
+        }
+        booster = lgb.train(
+            params, train_set, num_boost_round=400,
+            valid_sets=[val_set],
+            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)],
+        )
+        all_boosters.append(booster)
+
+        # 難例重加權：最大預測機率低 → 樣本難 → 加大權重
+        if i < n_models - 1:
+            proba      = booster.predict(X_tr)
+            confidence = np.max(proba, axis=1)
+            difficulty = 1.0 - confidence
+            weights    = sample_weight * (0.5 + difficulty)
+            weights    = weights / weights.mean()
+
+    def predict_fn(X, boosters=all_boosters, masks=all_masks):
+        probas = [b.predict(X.iloc[:, m]) for b, m in zip(boosters, masks)]
+        return np.mean(probas, axis=0)
+
+    return all_boosters, predict_fn, all_masks
+
+
 BUILDERS = {
     "lightgbm":    _build_lgbm,
     "xgboost":     _build_xgb,
@@ -120,6 +171,8 @@ class TradingModel:
         self._models: list = []          # list of (model_obj, predict_fn)
         self._feature_names: list[str] = []
         self._version: str = ""
+        self._de_all_boosters: list = []  # double_ensemble: all N boosters
+        self._de_masks: list = []         # double_ensemble: per-booster feature masks
 
     # ── Training ──────────────────────────────────────────────────────────────
 
@@ -149,6 +202,14 @@ class TradingModel:
                 builder = BUILDERS[name]
                 obj, fn = builder(X_train, y_train, X_val, y_val, sample_weight)
                 self._models.append((obj, fn))
+        elif self.model_type == "double_ensemble":
+            logger.info("  訓練 DoubleEnsemble (5× LightGBM + 難例加權)...")
+            all_boosters, predict_fn, all_masks = _build_double_ensemble(
+                X_train, y_train, X_val, y_val, sample_weight
+            )
+            self._de_all_boosters = all_boosters
+            self._de_masks = all_masks
+            self._models = [(all_boosters[0], predict_fn)]
         else:
             builder = BUILDERS.get(self.model_type, _build_lgbm)
             obj, fn = builder(X_train, y_train, X_val, y_val, sample_weight)
@@ -184,7 +245,16 @@ class TradingModel:
             return {"class": 1, "signal": "HOLD", "buy_proba": 0.0,
                     "sell_proba": 0.0, "hold_proba": 1.0, "trained": False}
 
-        X = X_row[self._feature_names] if self._feature_names else X_row
+        if self._feature_names:
+            # 補齊 market_cache 可能缺少的新特徵欄，填 0 而非拋 KeyError
+            missing = [c for c in self._feature_names if c not in X_row.columns]
+            if missing:
+                for c in missing:
+                    X_row = X_row.copy()
+                    X_row[c] = 0.0
+            X = X_row[self._feature_names]
+        else:
+            X = X_row
         proba = self._predict_proba(X)[0]
 
         buy_proba  = float(proba[BUY_CLASS_IDX])
@@ -233,15 +303,20 @@ class TradingModel:
             raise RuntimeError("No model to save")
         version = version or datetime.now().strftime("%Y%m%d_%H%M")
         self._version = version
-        prefix = self.model_type[:4]   # lgbm / xgbo / catb / rand / ense
+        prefix = self.model_type[:4]   # lgbm / xgbo / catb / rand / ense / doub
         path = self.model_dir / f"{prefix}_{version}.pkl"
+        payload: dict = {
+            "feature_names": self._feature_names,
+            "version": version,
+            "model_type": self.model_type,
+        }
+        if self.model_type == "double_ensemble" and self._de_all_boosters:
+            payload["de_boosters"] = self._de_all_boosters
+            payload["de_masks"]    = self._de_masks
+        else:
+            payload["models"] = [(obj,) for obj, _ in self._models]
         with open(path, "wb") as f:
-            pickle.dump({
-                "models": [(obj,) for obj, _ in self._models],
-                "feature_names": self._feature_names,
-                "version": version,
-                "model_type": self.model_type,
-            }, f)
+            pickle.dump(payload, f)
         logger.info(f"Model saved: {path}")
         return path
 
@@ -270,31 +345,43 @@ class TradingModel:
             data = pickle.load(f)
 
         saved_type = data.get("model_type", "lightgbm")
-        self.model_type = saved_type
+        # Keep configured model_type (from MODEL_TYPE env) for future training.
+        # saved_type is used only for reconstructing the loaded model's predict_fn.
         self._feature_names = data["feature_names"]
         self._version       = data.get("version", "unknown")
 
         # Rebuild predict_fn for each saved model object
-        # Support both old format {"booster": ...} and new format {"models": [...]}
         self._models = []
         import lightgbm as lgb
-        if "models" in data:
-            raw_list = data["models"]
-        elif "booster" in data:
-            raw_list = [(data["booster"],)]
+
+        if saved_type == "double_ensemble" and "de_boosters" in data:
+            all_boosters = data["de_boosters"]
+            all_masks    = data["de_masks"]
+            self._de_all_boosters = all_boosters
+            self._de_masks        = all_masks
+            def _de_predict(X, _b=all_boosters, _m=all_masks):
+                probas = [b.predict(X.iloc[:, m]) for b, m in zip(_b, _m)]
+                return np.mean(probas, axis=0)
+            self._models = [(all_boosters[0], _de_predict)]
         else:
-            raw_list = []
-
-        for (obj,) in raw_list:
-            if isinstance(obj, lgb.Booster):
-                fn = obj.predict
-            elif hasattr(obj, "predict_proba"):
-                fn = obj.predict_proba
+            # Support both old format {"booster": ...} and new format {"models": [...]}
+            if "models" in data:
+                raw_list = data["models"]
+            elif "booster" in data:
+                raw_list = [(data["booster"],)]
             else:
-                fn = lambda X, o=obj: o.predict_proba(X)
-            self._models.append((obj, fn))
+                raw_list = []
 
-        logger.info(f"Model loaded: {path} (type={self.model_type}, version={self._version})")
+            for (obj,) in raw_list:
+                if isinstance(obj, lgb.Booster):
+                    fn = obj.predict
+                elif hasattr(obj, "predict_proba"):
+                    fn = obj.predict_proba
+                else:
+                    fn = lambda X, o=obj: o.predict_proba(X)
+                self._models.append((obj, fn))
+
+        logger.info(f"Model loaded: {path} (saved_type={saved_type}, active_type={self.model_type}, version={self._version})")
         return True
 
     def is_trained(self) -> bool:

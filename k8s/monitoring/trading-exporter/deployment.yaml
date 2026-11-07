@@ -27,6 +27,10 @@ spec:
               value: /data/paper_trader_state.json
             - name: DAY_FILE
               value: /data/day_trader_state.json
+            - name: US_FILE
+              value: /data/us/us_paper_state.json
+            - name: CRYPTO_FILE
+              value: /data/crypto_paper_state.json
           resources:
             requests:
               cpu: 10m

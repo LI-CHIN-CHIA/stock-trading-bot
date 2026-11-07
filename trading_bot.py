@@ -340,17 +340,78 @@ def job_daily_summary():
     except Exception as e:
         logger.warning(f"Telegram 每日戰報發送失敗: {e}")
 
+    # 當沖每日績效（含各影子帳戶 2% 目標追蹤）
+    day_report_path = None
+    try:
+        day_summary   = day_bot.get_summary()
+        day_real_pnl  = day_summary.get("daily_pnl", 0.0)
+        day_real_cash = day_summary.get("cash", 0.0)
+        day_shadows   = day_summary.get("shadows", {})
+
+        TARGET_PCT = 0.02  # 2% 每日目標
+
+        shadow_rows = []
+        for cap_key, acc in day_shadows.items():
+            initial = acc.get("initial", int(cap_key))
+            pnl     = acc.get("pnl", 0.0)
+            pnl_pct = pnl / initial if initial > 0 else 0.0
+            shadow_rows.append({
+                "capital":    initial,
+                "pnl":        round(pnl, 0),
+                "pnl_pct":    round(pnl_pct, 4),
+                "target_pnl": round(initial * TARGET_PCT, 0),
+                "hit_target": pnl_pct >= TARGET_PCT,
+            })
+
+        real_budget  = float(_os.getenv("DAY_MAX_BUDGET", "50000"))
+        real_pnl_pct = day_real_pnl / real_budget if real_budget > 0 else 0.0
+        day_report = {
+            "date":        today,
+            "target_pct":  TARGET_PCT,
+            "real": {
+                "budget":    real_budget,
+                "pnl":       round(day_real_pnl, 0),
+                "pnl_pct":   round(real_pnl_pct, 4),
+                "hit_target": real_pnl_pct >= TARGET_PCT,
+            },
+            "shadows":     shadow_rows,
+            "trades_today": day_summary.get("trades_today", 0),
+        }
+
+        day_report_path = Path(_os.getenv("DATA_DIR", Path(__file__).parent)) / "day_daily_report.json"
+        day_history = []
+        if day_report_path.exists():
+            try:
+                with open(day_report_path) as f:
+                    day_history = _json.load(f)
+            except Exception:
+                day_history = []
+        day_history = [r for r in day_history if r.get("date") != today]
+        day_history.append(day_report)
+        with open(day_report_path, "w") as f:
+            _json.dump(day_history, f, ensure_ascii=False, indent=2)
+
+        # 統計影子帳戶達標率
+        hit_count = sum(1 for r in shadow_rows if r["hit_target"])
+        logger.info(
+            f"📊 當沖日報 {today}  真實損益={day_real_pnl:+,.0f}"
+            f"  影子達標={hit_count}/{len(shadow_rows)}"
+        )
+    except Exception as e:
+        logger.warning(f"當沖日報儲存失敗: {e}")
+
     # 自動 commit 績效報告至 git，供 cloud agent 每週分析
     try:
         import subprocess as _sp
         repo_root = Path(__file__).parent
-        # 只 commit 報告檔，不動其他未追蹤的東西
         _sp.run(["git", "add", str(report_path)], cwd=repo_root, check=True)
+        if day_report_path and day_report_path.exists():
+            _sp.run(["git", "add", str(day_report_path)], cwd=repo_root, check=True)
         result = _sp.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=repo_root
         )
-        if result.returncode != 0:  # 有變更才 commit
+        if result.returncode != 0:
             _sp.run([
                 "git", "commit", "-m",
                 f"perf: 每日績效報告 {today} (總資產={total_value:,.0f}, 損益={realized_pnl:+.0f})"
@@ -407,9 +468,15 @@ def main():
             logger.info("✅ 富邦實盤登入成功（啟動時）")
             # 注入 SDK 給 DayTrader，讓當沖可選擇真實下單
             day_bot.set_real_trading(
-                place_order_fn  = bot._place_order,
-                check_filled_fn = bot._check_filled,
-                cancel_order_fn = bot._cancel_order,
+                place_order_fn    = bot._place_order,
+                check_filled_fn   = bot._check_filled,
+                cancel_order_fn   = lambda code, order_no: bot._cancel_order(order_no, code),
+                inventories_fn    = lambda: bot._call_with_relogin(
+                    lambda: bot.sdk.accounting.inventories(bot.account)),
+                unrealized_fn     = lambda: bot._call_with_relogin(
+                    lambda: bot.sdk.accounting.unrealized_gains_and_loses(bot.account)),
+                daytrade_info_fn  = lambda code: bot._call_with_relogin(
+                    lambda: bot.sdk.stock.daytrade_and_stock_info(bot.account, code)),
             )
         else:
             logger.error("❌ 富邦實盤登入失敗，監控仍會執行但委託需等 09:10 重新登入")

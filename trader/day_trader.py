@@ -53,7 +53,8 @@ DAY_STOP_LOSS_PCT   = float(os.getenv("DAY_STOP_LOSS_PCT",   "-0.015")) # -1.5%
 DAY_TAKE_PROFIT_PCT = float(os.getenv("DAY_TAKE_PROFIT_PCT", "0.025"))  # +2.5%
 DAY_FORCE_CLOSE_H   = 13
 DAY_FORCE_CLOSE_M   = 20
-ENABLE_DAY_TRADING  = os.getenv("ENABLE_DAY_TRADING", "false").lower() == "true"
+ENABLE_DAY_TRADING   = os.getenv("ENABLE_DAY_TRADING",   "false").lower() == "true"
+ENABLE_SHORT_TRADING = os.getenv("ENABLE_SHORT_TRADING", "false").lower() == "true"
 
 # 手續費 & 證交稅（當沖）
 _COMMISSION_RATE = 0.001425   # 券商手續費 0.1425%（可折扣）
@@ -62,7 +63,17 @@ _MIN_FEE         = 20         # 最低手續費 20 元
 
 # 真實下單旗標
 DAY_REAL_TRADING = os.getenv("DAY_REAL_TRADING", "false").lower() == "true"
-DAY_MAX_BUDGET   = float(os.getenv("DAY_MAX_BUDGET", "50000"))  # 單筆最高金額 NTD
+DAY_MAX_BUDGET    = float(os.getenv("DAY_MAX_BUDGET",    "50000"))   # 單筆最高金額 NTD（真實）
+DAY_SHADOW_BUDGET = float(os.getenv("DAY_SHADOW_BUDGET", "160000"))  # 影子帳戶單筆預算（已棄用，保留相容）
+_SHADOW_CAPS_STR  = os.getenv("DAY_SHADOW_CAPITALS", "500000,1000000,1500000,2000000,2500000,3000000,3500000,4000000,4500000,5000000")
+SHADOW_CAPITALS: list[int] = [int(x.strip()) for x in _SHADOW_CAPS_STR.split(",") if x.strip().isdigit()]
+
+# 移動停利：達 +1.5% 後啟動，trailing distance 1%
+DAY_TRAIL_ACTIVATE_PCT = float(os.getenv("DAY_TRAIL_ACTIVATE_PCT", "0.015"))
+DAY_TRAIL_DISTANCE_PCT = float(os.getenv("DAY_TRAIL_DISTANCE_PCT", "0.010"))
+# 時間衰退：持倉 N 分鐘仍在 ±band 橫盤 → 主動出場
+DAY_TIME_DECAY_MIN  = int(os.getenv("DAY_TIME_DECAY_MIN",  "30"))
+DAY_TIME_DECAY_BAND = float(os.getenv("DAY_TIME_DECAY_BAND", "0.005"))
 
 # 量能門檻：近20根1min K 均量至少 15,000 股（≈日均3000張@1min），進場那根至少均量 80%
 DAY_MIN_AVG_VOLUME    = int(os.getenv("DAY_MIN_AVG_VOLUME",    "15000"))
@@ -257,6 +268,14 @@ def _fast_price(code: str) -> float | None:
         return None
 
 
+def _new_shadows() -> dict:
+    """建立多階段影子帳戶初始狀態。"""
+    return {
+        str(cap): {"initial": int(cap), "cash": float(cap), "pnl": 0.0, "holdings": {}}
+        for cap in SHADOW_CAPITALS
+    }
+
+
 class DayTrader:
     """當沖紙上交易，每 1 分鐘 run_cycle() 一次；持倉時背景執行緒每 10 秒盯盤。"""
 
@@ -267,25 +286,34 @@ class DayTrader:
         self._monitor_stop = threading.Event()
         self._monitor_thr: threading.Thread | None = None
         # 真實下單 SDK 注入（預設為 None，即純紙上模式）
-        self._place_order_fn:  object = None   # callable(code, side, shares, price) -> order_no|None
-        self._check_filled_fn: object = None   # callable(code, order_no) -> int  0=pending -1=rejected N=filled
-        self._cancel_order_fn: object = None   # callable(code, order_no)
+        self._place_order_fn:     object = None  # callable(code, side, shares, price) -> order_no|None
+        self._check_filled_fn:    object = None  # callable(code, order_no) -> (qty, fill_price)
+        self._cancel_order_fn:    object = None  # callable(code, order_no)
+        self._inventories_fn:     object = None  # callable() -> SDK result (inventories)
+        self._unrealized_fn:      object = None  # callable() -> SDK result (unrealized_gains)
+        self._daytrade_info_fn:   object = None  # callable(code) -> SDK result (daytrade_and_stock_info)
+        self._daytrade_cache:     dict   = {}    # code -> {date, status, quota, eligible}
         self._pending_buy_orders:  dict = {}   # order_no -> {code, shares, price, reserved_cash, analysis, predicted_gain, placed_at}
         self._pending_sell_orders: dict = {}   # order_no -> {code, shares, price, reason, placed_at}
+        self._last_monitoring_tg_ts: float = 0.0  # 上次盯盤 Telegram 發送時間
         # 若啟動時已有持倉（跨週期 reload），立即啟動背景監控
         if self._state.get("holdings"):
             self._start_fast_monitor()
 
     # ── SDK 注入（真實下單）─────────────────────────────────────────────────────
 
-    def set_real_trading(self, place_order_fn, check_filled_fn, cancel_order_fn=None):
+    def set_real_trading(self, place_order_fn, check_filled_fn, cancel_order_fn=None,
+                         inventories_fn=None, unrealized_fn=None, daytrade_info_fn=None):
         """
-        注入 TradingBot 的下單 / 查詢成交 / 取消委託函式。
+        注入 TradingBot 的下單 / 查詢成交 / 取消委託 / 庫存查詢 / 當沖資格查詢函式。
         呼叫後若 DAY_REAL_TRADING=true，買賣將透過 Fubon SDK 執行。
         """
-        self._place_order_fn  = place_order_fn
-        self._check_filled_fn = check_filled_fn
-        self._cancel_order_fn = cancel_order_fn
+        self._place_order_fn    = place_order_fn
+        self._check_filled_fn   = check_filled_fn
+        self._cancel_order_fn   = cancel_order_fn
+        self._inventories_fn    = inventories_fn
+        self._unrealized_fn     = unrealized_fn
+        self._daytrade_info_fn  = daytrade_info_fn
         mode = "真實下單" if DAY_REAL_TRADING else "紙上（DAY_REAL_TRADING=false）"
         logger.info(f"[DayTrader] set_real_trading 完成，模式={mode}  單筆上限={DAY_MAX_BUDGET:,.0f}")
 
@@ -321,15 +349,46 @@ class DayTrader:
             if not ((9, 0) <= (now.hour, now.minute) <= (13, 30)):
                 continue
             # 網路取價在鎖外（避免佔鎖 0.5~2 秒）
-            for code in list(holdings_snap):
+            for key in list(holdings_snap):
+                h = holdings_snap[key]
+                is_short = h.get("direction") == "short"
+                code = h.get("code", key) if is_short else key
                 try:
                     price = _fast_price(code)
                     if price is None:
                         continue
-                    h = holdings_snap[code]
+
+                    if is_short:
+                        sl = h["stop_loss"]
+                        tp = h["take_profit"]
+                        pct = (h["entry_price"] - price) / h["entry_price"]
+                        if now.second < 15:
+                            try:
+                                from utils.telegram_notify import send, _name
+                                send(
+                                    f"📍 <b>反沖盯盤 {_name(code)}</b>  {price:.2f}"
+                                    f"  ({pct:+.2%})\n"
+                                    f"SL {sl:.2f} / TP {tp:.2f}",
+                                    key=f"watch_s:{code}:{now.minute}",
+                                    cooldown=50,
+                                )
+                            except Exception:
+                                pass
+                        if price >= sl:
+                            self._paper_cover(code, price, f"停損 {sl:.2f}")
+                        elif price <= tp:
+                            self._paper_cover(code, price, f"停利 {tp:.2f}")
+                        continue
+
+                    # 多方邏輯
+                    # 移動停利更新（在鎖內；holdings_snap[key] 與 _state["holdings"][key] 共享引用）
+                    with self._lock:
+                        self._update_trailing_stop(code, price)
+
+                    h = holdings_snap[key]
                     entry = h["entry_price"]
                     pct   = (price - entry) / entry
-                    sl    = h["stop_loss"]
+                    sl    = h["stop_loss"]   # 可能已被 _update_trailing_stop 上移
                     tp    = h["take_profit"]
 
                     # 推播持倉狀態（每分鐘第一次 tick，避免過多訊息）
@@ -385,19 +444,27 @@ class DayTrader:
         if path.exists():
             try:
                 with open(path, encoding="utf-8") as f:
-                    return json.load(f)
+                    state = json.load(f)
+                # 遷移：舊單一影子帳戶欄位 → 新多帳戶 shadows dict
+                if "shadow_cash" in state or "shadow_holdings" in state:
+                    state.pop("shadow_cash",     None)
+                    state.pop("shadow_pnl",      None)
+                    state.pop("shadow_holdings", None)
+                state.setdefault("shadows", _new_shadows())
+                return state
             except Exception:
                 pass
         return self._new_state()
 
     def _new_state(self) -> dict:
         return {
-            "date":         str(date.today()),
-            "cash":         DAY_INITIAL_CAPITAL,
-            "holdings":     {},
-            "trade_log":    [],
-            "daily_pnl":    0.0,
-            "watch_log":    {},  # code -> last analysis snapshot
+            "date":      str(date.today()),
+            "cash":      DAY_INITIAL_CAPITAL,
+            "holdings":  {},
+            "trade_log": [],
+            "daily_pnl": 0.0,
+            "watch_log": {},
+            "shadows":   _new_shadows(),
         }
 
     def _save_state(self):
@@ -469,11 +536,10 @@ class DayTrader:
 
         # 單筆預算：資金比例 與 DAY_MAX_BUDGET 取較小值
         budget  = min(self._state["cash"] * DAY_PER_TRADE_PCT, DAY_MAX_BUDGET)
-        # 先嘗試整張（1000股倍數），不足1張才買零股
+        # 當沖只能整張（零股不支援當沖），不足1張直接跳過
         shares = int(budget // (price * 1000)) * 1000
         if shares <= 0:
-            shares = int(budget // price)   # 零股：至少 1 股
-        if shares <= 0:
+            logger.info(f"[DayTrader] ⛔ {code} 預算不足一張  需={price*1000:,.0f}  可用={budget:,.0f}，跳過")
             return False
         cost     = shares * price
         buy_fee  = max(_MIN_FEE, round(cost * _COMMISSION_RATE))
@@ -505,6 +571,8 @@ class DayTrader:
             "shares":         shares,
             "entry_price":    price,
             "entry_time":     self._now_tw().strftime("%H:%M"),
+            "entry_ts":       time.time(),
+            "is_real":        False,  # 紙上買入，賣出不走真實委託
             "cost":           total_cost,   # 含買進手續費
             "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
             "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
@@ -527,6 +595,279 @@ class DayTrader:
         self._start_fast_monitor()
         return True
 
+    # ── 反沖（空方）紙上交易 ──────────────────────────────────────────────────
+
+    def _paper_short(self, code: str, price: float, analysis: dict) -> bool:
+        """空方進場：模擬先賣後買（反沖），只走紙上，不送真實委託。"""
+        with self._lock:
+            holdings = self._state["holdings"]
+            short_key = f"SHORT_{code}"
+            if short_key in holdings or code in holdings:
+                return False
+            if len(holdings) >= DAY_MAX_POSITIONS:
+                return False
+
+            budget = min(self._state["cash"] * DAY_PER_TRADE_PCT, DAY_MAX_BUDGET)
+            shares = int(budget // (price * 1000)) * 1000
+            if shares <= 0:
+                logger.info(f"[DayTrader] ⛔ {code} 空方預算不足，跳過")
+                return False
+
+            sell_value = shares * price
+            sell_fee   = max(_MIN_FEE, round(sell_value * _COMMISSION_RATE))
+            stt        = round(sell_value * _STT_RATE)
+
+            holdings[short_key] = {
+                "code":         code,
+                "direction":    "short",
+                "shares":       shares,
+                "entry_price":  price,
+                "entry_time":   self._now_tw().strftime("%H:%M"),
+                "entry_ts":     time.time(),
+                "is_real":      False,
+                "proceeds":     sell_value - sell_fee - stt,   # 賣出淨收
+                "stop_loss":    round(price * (1 + abs(DAY_STOP_LOSS_PCT)), 2),   # 漲到這裡停損
+                "take_profit":  round(price * (1 - abs(DAY_TAKE_PROFIT_PCT)), 2), # 跌到這裡停利
+            }
+            self._log_trade(code, "SHORT", shares, price, "反沖賣出", analysis)
+            logger.info(
+                f"[DayTrader] 🔴 反沖空頭 {code}  {shares}股 @{price:.2f}"
+                f"  score={analysis.get('score')}  delta={analysis.get('vol_delta_signal')}"
+            )
+            try:
+                from utils.telegram_notify import notify_buy
+                notify_buy("反沖(空)", code, shares, price,
+                           f"score={analysis.get('score')} 反沖空頭進場")
+            except Exception:
+                pass
+            self._start_fast_monitor()
+            return True
+
+    def _paper_cover(self, code: str, price: float, reason: str) -> float:
+        """空方平倉：買回，計算損益。"""
+        with self._lock:
+            holdings = self._state["holdings"]
+            short_key = f"SHORT_{code}"
+            if short_key not in holdings:
+                return 0.0
+            h = holdings.pop(short_key)
+            shares = h["shares"]
+            buy_back = shares * price
+            buy_fee  = max(_MIN_FEE, round(buy_back * _COMMISSION_RATE))
+            pnl = h["proceeds"] - (buy_back + buy_fee)
+            self._state["daily_pnl"] += pnl
+            self._log_trade(code, "COVER", shares, price, reason, {})
+            emoji = "🟩" if pnl >= 0 else "🟥"
+            logger.info(
+                f"[DayTrader] {emoji} 反沖回補 {code}  {shares}股 @{price:.2f}"
+                f"  損益={pnl:+,.0f} TWD  原因={reason}"
+            )
+            try:
+                from utils.telegram_notify import notify_sell
+                notify_sell("反沖(空)", code, shares, price, pnl, reason)
+            except Exception:
+                pass
+            return pnl
+
+    # ── 影子帳戶（多資本層模擬） ──────────────────────────────────────────────
+
+    def __create_shadow_long(self, code: str, price: float, analysis: dict):
+        """對每個影子帳戶嘗試多方進場（需在 _lock 內呼叫）。"""
+        for cap_key, acc in self._state.get("shadows", {}).items():
+            sh = acc["holdings"]
+            if code in sh or len(sh) >= DAY_MAX_POSITIONS:
+                continue
+            budget = acc["cash"] * DAY_PER_TRADE_PCT
+            shares = int(budget // (price * 1000)) * 1000
+            if shares <= 0:
+                continue
+            cost  = shares * price
+            fee   = max(_MIN_FEE, round(cost * _COMMISSION_RATE))
+            total = cost + fee
+            if total > acc["cash"]:
+                continue
+            acc["cash"] -= total
+            sh[code] = {
+                "shares":      shares,
+                "entry_price": price,
+                "entry_time":  self._now_tw().strftime("%H:%M"),
+                "entry_ts":    time.time(),
+                "cost":        total,
+                "stop_loss":   round(price * (1 + DAY_STOP_LOSS_PCT), 2),
+                "take_profit": round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+            }
+            cap = acc["initial"]
+            logger.info(
+                f"[Shadow-{cap//10000}萬] 🔵 買入 {code}  {shares}股 @{price:.2f}"
+                f"  現金={acc['cash']:,.0f}"
+            )
+
+    def __create_shadow_short(self, code: str, price: float, analysis: dict):
+        """對每個影子帳戶嘗試空方進場（需在 _lock 內呼叫）。"""
+        for cap_key, acc in self._state.get("shadows", {}).items():
+            sh = acc["holdings"]
+            short_key = f"SHORT_{code}"
+            if short_key in sh or len(sh) >= DAY_MAX_POSITIONS:
+                continue
+            budget   = acc["cash"] * DAY_PER_TRADE_PCT
+            shares   = int(budget // (price * 1000)) * 1000
+            if shares <= 0:
+                continue
+            sell_val = shares * price
+            sell_fee = max(_MIN_FEE, round(sell_val * _COMMISSION_RATE))
+            stt      = round(sell_val * _STT_RATE)
+            sh[short_key] = {
+                "code":        code,
+                "direction":   "short",
+                "shares":      shares,
+                "entry_price": price,
+                "entry_time":  self._now_tw().strftime("%H:%M"),
+                "entry_ts":    time.time(),
+                "proceeds":    sell_val - sell_fee - stt,
+                "stop_loss":   round(price * (1 + abs(DAY_STOP_LOSS_PCT)), 2),
+                "take_profit": round(price * (1 - abs(DAY_TAKE_PROFIT_PCT)), 2),
+            }
+            cap = acc["initial"]
+            logger.info(
+                f"[Shadow-{cap//10000}萬] 🔴 反沖空頭 {code}  {shares}股 @{price:.2f}"
+                f"  現金={acc['cash']:,.0f}"
+            )
+
+    def _shadow_sell_acc(self, acc: dict, code: str, price: float, reason: str) -> float:
+        """單一影子帳戶多方出場（需在 _lock 內呼叫）。"""
+        sh = acc["holdings"]
+        if code not in sh:
+            return 0.0
+        h        = sh.pop(code)
+        shares   = h["shares"]
+        proceeds = shares * price
+        sell_fee = max(_MIN_FEE, round(proceeds * _COMMISSION_RATE))
+        stt      = round(proceeds * _STT_RATE)
+        net      = proceeds - sell_fee - stt
+        pnl      = net - h["cost"]
+        acc["cash"] += net
+        acc["pnl"]  += pnl
+        cap = acc["initial"]
+        logger.info(
+            f"[Shadow-{cap//10000}萬] {'🟩' if pnl>=0 else '🟥'} 賣出 {code}"
+            f"  {shares}股 @{price:.2f}  損益={pnl:+,.0f}  原因={reason}"
+        )
+        return pnl
+
+    def _shadow_cover_acc(self, acc: dict, code: str, price: float, reason: str) -> float:
+        """單一影子帳戶空方平倉（需在 _lock 內呼叫）。"""
+        sh = acc["holdings"]
+        short_key = f"SHORT_{code}"
+        if short_key not in sh:
+            return 0.0
+        h       = sh.pop(short_key)
+        shares  = h["shares"]
+        buy_bk  = shares * price
+        buy_fee = max(_MIN_FEE, round(buy_bk * _COMMISSION_RATE))
+        pnl     = h["proceeds"] - (buy_bk + buy_fee)
+        acc["pnl"] += pnl
+        cap = acc["initial"]
+        logger.info(
+            f"[Shadow-{cap//10000}萬] {'🟩' if pnl>=0 else '🟥'} 反沖回補 {code}"
+            f"  {shares}股 @{price:.2f}  損益={pnl:+,.0f}  原因={reason}"
+        )
+        return pnl
+
+    def _shadow_sell(self, code: str, price: float, reason: str):
+        with self._lock:
+            for acc in self._state.get("shadows", {}).values():
+                self._shadow_sell_acc(acc, code, price, reason)
+
+    def _shadow_cover(self, code: str, price: float, reason: str):
+        with self._lock:
+            for acc in self._state.get("shadows", {}).values():
+                self._shadow_cover_acc(acc, code, price, reason)
+
+    def _check_shadow_holdings(self):
+        """影子帳戶持倉監控（同等 SL/TP/時間衰退邏輯）。每個代碼只抓一次行情。"""
+        shadows = self._state.get("shadows", {})
+        if not shadows:
+            return
+
+        force_close = self._is_force_close_time()
+
+        # 收集所有影子帳戶持有的唯一代碼
+        long_codes:  set[str] = set()
+        short_codes: set[str] = set()
+        for acc in shadows.values():
+            for key in acc["holdings"]:
+                if key.startswith("SHORT_"):
+                    short_codes.add(key[6:])
+                else:
+                    long_codes.add(key)
+
+        if not long_codes and not short_codes:
+            return
+
+        # 每個代碼只下載一次
+        price_map: dict[str, float | None] = {}
+        df_map:    dict[str, object]        = {}
+        for code in long_codes | short_codes:
+            df = _fetch_intraday(code)
+            df_map[code]    = df
+            price_map[code] = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+
+        # 多方持倉
+        for code in long_codes:
+            price = price_map.get(code)
+            if price is None:
+                continue
+            # 移動停利（每帳戶各自更新 SL）
+            with self._lock:
+                for acc in shadows.values():
+                    _h = acc["holdings"].get(code)
+                    if _h:
+                        pct2 = (price - _h["entry_price"]) / _h["entry_price"]
+                        if pct2 >= DAY_TRAIL_ACTIVATE_PCT:
+                            new_sl = round(price * (1 - DAY_TRAIL_DISTANCE_PCT), 2)
+                            if new_sl > _h["stop_loss"]:
+                                _h["stop_loss"] = new_sl
+            # 各帳戶獨立判斷出場
+            for cap_key, acc in shadows.items():
+                h = acc["holdings"].get(code)
+                if h is None:
+                    continue
+                entry = h["entry_price"]
+                pct   = (price - entry) / entry
+                with self._lock:
+                    if force_close:
+                        self._shadow_sell_acc(acc, code, price, "強制平倉 13:20")
+                    elif price <= h["stop_loss"]:
+                        self._shadow_sell_acc(acc, code, price, f"停損 {h['stop_loss']:.2f}")
+                    elif price >= h["take_profit"]:
+                        self._shadow_sell_acc(acc, code, price, f"停利 {h['take_profit']:.2f}")
+                    elif h.get("entry_ts") and (time.time() - h["entry_ts"]) >= DAY_TIME_DECAY_MIN * 60:
+                        if abs(pct) < DAY_TIME_DECAY_BAND:
+                            self._shadow_sell_acc(acc, code, price, f"時間衰退 {DAY_TIME_DECAY_MIN}分鐘")
+
+        # 空方持倉
+        for code in short_codes:
+            price = price_map.get(code)
+            if price is None:
+                continue
+            for cap_key, acc in shadows.items():
+                short_key = f"SHORT_{code}"
+                h = acc["holdings"].get(short_key)
+                if h is None:
+                    continue
+                entry_ts = h.get("entry_ts")
+                pct = (h["entry_price"] - price) / h["entry_price"]
+                with self._lock:
+                    if force_close:
+                        self._shadow_cover_acc(acc, code, price, "強制平倉 13:20")
+                    elif price >= h["stop_loss"]:
+                        self._shadow_cover_acc(acc, code, price, f"停損 {h['stop_loss']:.2f}")
+                    elif price <= h["take_profit"]:
+                        self._shadow_cover_acc(acc, code, price, f"停利 {h['take_profit']:.2f}")
+                    elif entry_ts and (time.time() - entry_ts) >= DAY_TIME_DECAY_MIN * 60:
+                        if abs(pct) < DAY_TIME_DECAY_BAND:
+                            self._shadow_cover_acc(acc, code, price, f"時間衰退 {DAY_TIME_DECAY_MIN}分鐘")
+
     def _paper_sell(self, code: str, price: float, reason: str) -> float:
         with self._lock:
             return self.__paper_sell(code, price, reason)
@@ -541,8 +882,9 @@ class DayTrader:
 
         h = holdings[code]
 
-        # 真實下單路徑（非阻塞：先標記 pending，成交後由 _confirm_pending_orders 更新狀態）
-        if DAY_REAL_TRADING and self._place_order_fn is not None:
+        # 真實下單路徑：只有真實買入的持倉（is_real=True）才走真實賣出，
+        # 避免對紙上持倉下真實委託而出現「集保庫存不足」錯誤。
+        if DAY_REAL_TRADING and self._place_order_fn is not None and h.get("is_real"):
             shares = h["shares"]
             order_no = self._place_order_fn(code, "SELL", shares, price)
             if not order_no:
@@ -555,6 +897,8 @@ class DayTrader:
                     "side": "SELL", "code": code, "shares": shares, "price": price,
                     "cost": h["cost"], "reason": reason, "placed_at": time.time(),
                     "retries": 0,
+                    "entry_price": h["entry_price"],
+                    "entry_ts":    h.get("entry_ts"),
                 }
                 logger.info(
                     f"[DayTrader] ⏳ 真實賣單送出 {code} {shares}股 @{price:.2f}"
@@ -616,14 +960,19 @@ class DayTrader:
         # ── 買單確認 ──────────────────────────────────────────────────────────
         buy_done = []
         for order_no, o in list(self._pending_buy_orders.items()):
-            filled = self._check_filled_fn(o["code"], order_no)
+            filled, fill_price = self._check_filled_fn(o["code"], order_no)
             if filled > 0:
-                # 已成交：建立持倉（以實際成交股數為準）
-                price = o["price"]
+                # 以實際成交價建倉；fill_price=0 代表 SDK 未回報，退守委託價
+                price = fill_price if fill_price > 0 else o["price"]
+                if fill_price > 0 and abs(fill_price - o["price"]) > 0.01:
+                    logger.info(
+                        f"[DayTrader] 📋 買入滑價 {o['code']}  委託={o['price']:.2f} → 成交={fill_price:.2f}"
+                        f"  差={fill_price - o['price']:+.2f}"
+                    )
                 cost  = filled * price
                 fee   = max(_MIN_FEE, round(cost * _COMMISSION_RATE))
                 total = cost + fee
-                # 若實際股數 < 預扣，退還差額
+                # 若實際金額 < 預扣，退還差額
                 refund = o["reserved_cash"] - total
                 with self._lock:
                     if refund > 0:
@@ -632,6 +981,8 @@ class DayTrader:
                         "shares":         filled,
                         "entry_price":    price,
                         "entry_time":     self._now_tw().strftime("%H:%M"),
+                        "entry_ts":       time.time(),
+                        "is_real":        True,
                         "cost":           total,
                         "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
                         "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
@@ -639,13 +990,26 @@ class DayTrader:
                     }
                     self._log_trade(o["code"], "BUY", filled, price, "當沖買入(真實)", o.get("analysis") or {}, o.get("predicted_gain"))
                 logger.info(f"[DayTrader] ✅ 買入確認 {o['code']} {filled}股 @{price:.2f}")
+                try:
+                    from utils.telegram_notify import notify_buy
+                    gain_str = f"model={o['predicted_gain']*100:.2f}%" if o.get("predicted_gain") else ""
+                    score_str = o.get("analysis", {}).get("score", "")
+                    notify_buy("當沖(真實)", o["code"], filled, price,
+                               f"score={score_str} {gain_str}".strip())
+                except Exception:
+                    pass
                 self._start_fast_monitor()
                 buy_done.append(order_no)
             elif filled == -1:
-                # 被拒：退還預扣資金
+                # 被拒：退還預扣資金，Telegram 告警
                 with self._lock:
                     self._state["cash"] += o["reserved_cash"]
                 logger.warning(f"[DayTrader] ❌ 買單被拒 {o['code']} {order_no}，已退款")
+                try:
+                    from utils.telegram_notify import send
+                    send(f"❌ <b>當沖買入失敗</b> {o['code']}  委託價={o['price']:.2f}  單號={order_no}", key=f"buy_reject:{order_no}")
+                except Exception:
+                    pass
                 buy_done.append(order_no)
             elif time.time() - o["placed_at"] > 120:
                 # 2 分鐘無成交：取消並退款
@@ -661,9 +1025,14 @@ class DayTrader:
         # ── 賣單確認 ──────────────────────────────────────────────────────────
         sell_done = []
         for order_no, o in list(self._pending_sell_orders.items()):
-            filled = self._check_filled_fn(o["code"], order_no)
+            filled, fill_price = self._check_filled_fn(o["code"], order_no)
             if filled > 0:
-                price = o["price"]
+                price = fill_price if fill_price > 0 else o["price"]
+                if fill_price > 0 and abs(fill_price - o["price"]) > 0.01:
+                    logger.info(
+                        f"[DayTrader] 📋 賣出滑價 {o['code']}  委託={o['price']:.2f} → 成交={fill_price:.2f}"
+                        f"  差={fill_price - o['price']:+.2f}"
+                    )
                 proceeds = filled * price
                 fee  = max(_MIN_FEE, round(proceeds * _COMMISSION_RATE))
                 stt  = round(proceeds * _STT_RATE)
@@ -674,27 +1043,39 @@ class DayTrader:
                     self._state["daily_pnl"] += pnl
                     self._log_trade(o["code"], "SELL", filled, price, o["reason"], {})
                 emoji = "🟩" if pnl >= 0 else "🟥"
+                slip_str = (f"  滑價={fill_price - o['price']:+.2f}" if fill_price > 0 and abs(fill_price - o["price"]) > 0.01 else "")
                 logger.info(
-                    f"[DayTrader] {emoji} 賣出確認 {o['code']} {filled}股 @{price:.2f}"
+                    f"[DayTrader] {emoji} 賣出確認 {o['code']} {filled}股 @{price:.2f}{slip_str}"
                     f"  手續費={fee+stt:,.0f}  損益={pnl:+,.0f} TWD"
                 )
                 try:
                     from utils.telegram_notify import notify_sell
-                    notify_sell("當沖", o["code"], filled, price, pnl, o["reason"])
+                    notify_sell("當沖(真實)", o["code"], filled, price, pnl,
+                                f"{o['reason']}{slip_str}")
                 except Exception:
                     pass
                 sell_done.append(order_no)
             elif filled == -1:
                 logger.warning(f"[DayTrader] ❌ 賣單被拒 {o['code']} {order_no}，重試")
+                try:
+                    from utils.telegram_notify import send
+                    send(f"❌ <b>當沖賣出失敗</b> {o['code']}  委託價={o['price']:.2f}  重試中", key=f"sell_reject:{order_no}")
+                except Exception:
+                    pass
                 sell_done.append(order_no)
                 # 重新放回 holdings，讓下一次 _check_holdings 觸發再賣
+                # 用原始買入成本價重建，避免以賣出委託價重算 SL/TP
                 with self._lock:
                     if o["code"] not in self._state["holdings"]:
+                        ep = o.get("entry_price", o["price"])
                         self._state["holdings"][o["code"]] = {
-                            "shares": o["shares"], "entry_price": o["price"],
-                            "entry_time": "??:??", "cost": o["cost"],
-                            "stop_loss":   round(o["price"] * (1 + DAY_STOP_LOSS_PCT), 2),
-                            "take_profit": round(o["price"] * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                            "shares": o["shares"], "entry_price": ep,
+                            "entry_time": "??:??",
+                            "entry_ts":   o.get("entry_ts", time.time()),
+                            "is_real": True,  # 賣單被拒，原始為真實持倉
+                            "cost": o["cost"],
+                            "stop_loss":   round(ep * (1 + DAY_STOP_LOSS_PCT), 2),
+                            "take_profit": round(ep * (1 + DAY_TAKE_PROFIT_PCT), 2),
                         }
             elif time.time() - o["placed_at"] > 60 and o.get("retries", 0) == 0:
                 # 60s 未成交：取消 + 以新價重試一次
@@ -709,48 +1090,269 @@ class DayTrader:
                     logger.warning(f"[DayTrader] ⚠️ 賣單超時重試 {o['code']} @{new_price:.2f} 新單號={new_no}")
                 else:
                     # 最後手段：紙上強制結算（確保 T+0）
-                    pnl_est = (new_price - o["price"]) * o["shares"]
+                    _pr = o["shares"] * new_price
+                    _fe = max(_MIN_FEE, round(_pr * _COMMISSION_RATE))
+                    _st = round(_pr * _STT_RATE)
+                    _net = _pr - _fe - _st
+                    pnl_est = _net - o["cost"]
                     with self._lock:
-                        self._state["cash"]      += o["shares"] * new_price
+                        self._state["cash"]      += _net
                         self._state["daily_pnl"] += pnl_est
                         self._log_trade(o["code"], "SELL", o["shares"], new_price, f"{o['reason']}(強制紙上)", {})
                     logger.error(
                         f"[DayTrader] ❌ {o['code']} 賣單重試失敗，紙上強制結算 @{new_price:.2f}"
+                        f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}"
                     )
                 sell_done.append(order_no)
             elif time.time() - o["placed_at"] > 120 and o.get("retries", 0) >= 1:
-                # 第二次也超時：紙上強制結算
+                # 第二次也超時：先取消委託，再紙上強制結算
+                if self._cancel_order_fn:
+                    self._cancel_order_fn(o["code"], order_no)
                 df = _fetch_intraday(o["code"])
                 fp = float(df["Close"].iloc[-1]) if df is not None else o["price"]
-                pnl_est = (fp - o["price"]) * o["shares"]
+                _pr = o["shares"] * fp
+                _fe = max(_MIN_FEE, round(_pr * _COMMISSION_RATE))
+                _st = round(_pr * _STT_RATE)
+                _net = _pr - _fe - _st
+                pnl_est = _net - o["cost"]
                 with self._lock:
-                    self._state["cash"]      += o["shares"] * fp
+                    self._state["cash"]      += _net
                     self._state["daily_pnl"] += pnl_est
                     self._log_trade(o["code"], "SELL", o["shares"], fp, f"{o['reason']}(強制紙上)", {})
-                logger.error(f"[DayTrader] ❌ {o['code']} 賣單兩次超時，紙上強制結算 @{fp:.2f}")
+                logger.error(f"[DayTrader] ❌ {o['code']} 賣單兩次超時，紙上強制結算 @{fp:.2f}"
+                             f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}")
                 sell_done.append(order_no)
         for no in sell_done:
             del self._pending_sell_orders[no]
 
+    # ── 當沖資格查詢 ─────────────────────────────────────────────────────────
+
+    def _check_daytrade_eligible(self, code: str) -> bool:
+        """
+        查詢富邦 daytrade_and_stock_info，確認該股今日是否可現股當沖。
+        結果每日快取，API 失敗時 fallback=True（不擋單，避免誤殺）。
+        第一版先記錄完整 status / quota，讓 log 幫我們確認值域。
+        """
+        if not self._daytrade_info_fn:
+            return True  # 未注入時不擋
+
+        today = self._now_tw().strftime("%Y-%m-%d")
+        cached = self._daytrade_cache.get(code)
+        if cached and cached.get("date") == today:
+            return cached["eligible"]
+
+        try:
+            result = self._daytrade_info_fn(code)
+            if not result.is_success or not result.data:
+                logger.warning(f"[DayTrader] 當沖資格查詢失敗 {code}，預設允許")
+                return True
+
+            d = result.data
+            status  = getattr(d, "status",                  None)
+            orig_q  = getattr(d, "daytrade_orig_quota",     None)
+            trade_q = getattr(d, "daytrade_tradable_quota", None)
+            pre_s   = getattr(d, "precollect_single",       None)
+            pre_a   = getattr(d, "precollect_accumulate",   None)
+
+            # 記錄完整回傳，供第一次觀察值域用
+            logger.info(
+                f"[DayTrader] 當沖資格 {code}"
+                f"  status={status}  orig_quota={orig_q}  tradable_quota={trade_q}"
+                f"  precollect_single={pre_s}  precollect_accumulate={pre_a}"
+            )
+
+            # status=0 通常代表「不可當沖」；其他值或 None 先放行
+            # 待觀察真實值後再設精確門檻
+            eligible = (status != 0)
+
+            self._daytrade_cache[code] = {"date": today, "eligible": eligible,
+                                          "status": status, "quota": trade_q}
+            if not eligible:
+                logger.info(f"[DayTrader] ⛔ {code} status={status} 不可現股當沖，跳過")
+            return eligible
+
+        except Exception as e:
+            logger.warning(f"[DayTrader] 當沖資格查詢例外 {code}: {e}，預設允許")
+            return True
+
+    # ── 富邦庫存同步 ──────────────────────────────────────────────────────────
+
+    def _sync_day_holdings_from_fubon(self):
+        """
+        每個 run_cycle 呼叫：用富邦 inventories + unrealized_gains 校正
+        DayTrader 的 is_real 持倉數量與成本價，確保 Telegram 數字跟 App 一致。
+        只同步 is_real=True 的持倉，不碰 paper 持倉，也不新增隔日沖部位。
+        """
+        if not self._inventories_fn:
+            return
+        try:
+            inv = self._inventories_fn()
+            if not inv.is_success or inv.data is None:
+                return
+
+            # 富邦庫存：code -> qty
+            fubon_qty: dict[str, int] = {}
+            for item in inv.data:
+                code = str(getattr(item, "stock_no", None) or "").strip()
+                odd  = getattr(item, "odd", None)
+                qty  = int((getattr(odd, "today_qty", 0) if odd else 0)
+                           or getattr(item, "today_qty", 0) or getattr(item, "tradable_qty", 0) or 0)
+                if code and qty > 0:
+                    fubon_qty[code] = qty
+
+            # 富邦成本價：code -> cost_price
+            cost_map: dict[str, float] = {}
+            if self._unrealized_fn:
+                try:
+                    unreal = self._unrealized_fn()
+                    if unreal.is_success and unreal.data:
+                        for u in unreal.data:
+                            c  = str(getattr(u, "stock_no", "") or "").strip()
+                            cp = float(getattr(u, "cost_price", 0) or 0)
+                            if c and cp > 0:
+                                cost_map[c] = cp
+                except Exception:
+                    pass
+
+            with self._lock:
+                holdings = self._state["holdings"]
+                for code in list(holdings):
+                    h = holdings[code]
+                    if not h.get("is_real"):
+                        continue
+
+                    # 富邦已無庫存 → 移除假持倉（可能已被其他路徑成交）
+                    if code not in fubon_qty:
+                        logger.warning(f"[DayTrader] ⚠️ 移除假持倉 {code}（富邦庫存=0）")
+                        del holdings[code]
+                        continue
+
+                    # 數量不符 → 以富邦為準
+                    if h["shares"] != fubon_qty[code]:
+                        logger.info(
+                            f"[DayTrader] 📋 數量修正 {code}"
+                            f"  本地={h['shares']} → 富邦={fubon_qty[code]}"
+                        )
+                        h["shares"] = fubon_qty[code]
+
+                    # 成本價不符 → 以富邦為準，同步更新 SL/TP
+                    if code in cost_map and abs(cost_map[code] - h["entry_price"]) > 0.05:
+                        old_ep = h["entry_price"]
+                        h["entry_price"] = cost_map[code]
+                        h["stop_loss"]   = round(cost_map[code] * (1 + DAY_STOP_LOSS_PCT), 2)
+                        h["take_profit"] = round(cost_map[code] * (1 + DAY_TAKE_PROFIT_PCT), 2)
+                        logger.info(
+                            f"[DayTrader] 📋 成本修正 {code}"
+                            f"  {old_ep:.2f} → {cost_map[code]:.2f}"
+                            f"  SL={h['stop_loss']:.2f}  TP={h['take_profit']:.2f}"
+                        )
+        except Exception as e:
+            logger.warning(f"[DayTrader] 富邦庫存同步失敗: {e}")
+
     # ── 持倉檢查 ─────────────────────────────────────────────────────────────
+
+    def _update_trailing_stop(self, code: str, price: float) -> bool:
+        """移動停利（必須在 _lock 內呼叫）。達 +1.5% 後以 1% trailing 上移 SL，SL 只升不降。"""
+        h = self._state["holdings"].get(code)
+        if h is None:
+            return False
+        entry = h["entry_price"]
+        pct = (price - entry) / entry
+        if pct < DAY_TRAIL_ACTIVATE_PCT:
+            return False
+        new_sl = round(price * (1 - DAY_TRAIL_DISTANCE_PCT), 2)
+        if new_sl > h["stop_loss"]:
+            old_sl = h["stop_loss"]
+            h["stop_loss"] = new_sl
+            logger.info(
+                f"[DayTrader] 📈 移動停利 {code}  SL {old_sl:.2f} → {new_sl:.2f}"
+                f"  現價 {price:.2f} ({pct:+.2%})"
+            )
+            return True
+        return False
 
     def _check_holdings(self):
         if not self._state["holdings"]:
             return
         force_close = self._is_force_close_time()
-        for code in list(self._state["holdings"]):
+        for key in list(self._state["holdings"]):
+            h = self._state["holdings"].get(key)
+            if h is None:
+                continue
+
+            # 空方持倉（key = "SHORT_{code}"）
+            if h.get("direction") == "short":
+                code = h["code"]
+                df = _fetch_intraday(code)
+                price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+                if price is None:
+                    continue
+                entry_ts = h.get("entry_ts")
+                pct = (h["entry_price"] - price) / h["entry_price"]  # 空方：跌=正收益
+
+                if force_close:
+                    self._paper_cover(code, price, "強制平倉 13:20")
+                    continue
+                if price >= h["stop_loss"]:
+                    self._paper_cover(code, price, f"停損 {h['stop_loss']:.2f}")
+                    continue
+                if price <= h["take_profit"]:
+                    self._paper_cover(code, price, f"停利 {h['take_profit']:.2f}")
+                    continue
+                if entry_ts and (time.time() - entry_ts) >= DAY_TIME_DECAY_MIN * 60:
+                    if abs(pct) < DAY_TIME_DECAY_BAND:
+                        self._paper_cover(code, price, f"時間衰退 {DAY_TIME_DECAY_MIN}分鐘橫盤")
+                        continue
+                # 理由消失：進場條件是 VWAP 下方；突破 VWAP 且已持倉 > 5 分鐘 → 出場
+                if (df is not None and not df.empty
+                        and entry_ts and (time.time() - entry_ts) > 300):
+                    vwap_ser = _vwap(df)
+                    vwap_val = float(vwap_ser.iloc[-1]) if not np.isnan(vwap_ser.iloc[-1]) else None
+                    if vwap_val and price > vwap_val and pct > DAY_STOP_LOSS_PCT:
+                        self._paper_cover(code, price, f"突破VWAP {vwap_val:.2f}")
+                continue
+
+            # 多方持倉（key = code）
+            code = key
             df = _fetch_intraday(code)
             price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
             if price is None:
                 continue
-            h = self._state["holdings"][code]
+
+            # 移動停利（每分鐘更新一次 SL）
+            with self._lock:
+                self._update_trailing_stop(code, price)
+
+            h = self._state["holdings"].get(code)
+            if h is None:
+                continue
+            entry = h["entry_price"]
+            pct   = (price - entry) / entry
+
             if force_close:
                 self._paper_sell(code, price, "強制平倉 13:20")
                 continue
             if price <= h["stop_loss"]:
                 self._paper_sell(code, price, f"停損 {h['stop_loss']:.2f}")
+                continue
             elif price >= h["take_profit"]:
                 self._paper_sell(code, price, f"停利 {h['take_profit']:.2f}")
+                continue
+
+            # 時間衰退：持倉超過 N 分鐘仍橫盤 → 換股
+            entry_ts = h.get("entry_ts")
+            if entry_ts and (time.time() - entry_ts) >= DAY_TIME_DECAY_MIN * 60:
+                if abs(pct) < DAY_TIME_DECAY_BAND:
+                    self._paper_sell(code, price, f"時間衰退 {DAY_TIME_DECAY_MIN}分鐘橫盤")
+                    continue
+
+            # 理由消失：進場條件是 VWAP 上方；跌破 VWAP 且已持倉 > 5 分鐘 → 出場
+            if (df is not None and not df.empty
+                    and entry_ts and (time.time() - entry_ts) > 300):
+                vwap_ser = _vwap(df)
+                vwap_val = float(vwap_ser.iloc[-1]) if not np.isnan(vwap_ser.iloc[-1]) else None
+                if vwap_val and price < vwap_val and pct > DAY_STOP_LOSS_PCT:
+                    self._paper_sell(code, price, f"跌破VWAP {vwap_val:.2f}")
 
     # ── 盤況記錄（持續盯盤）──────────────────────────────────────────────────
 
@@ -768,13 +1370,38 @@ class DayTrader:
     def _scan_entries(self):
         if not self._is_buy_window():
             return
-        if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
+
+        real_full = len(self._state["holdings"]) >= DAY_MAX_POSITIONS
+        shadows   = self._state.get("shadows", {})
+        all_shadow_full = (
+            DAY_REAL_TRADING and bool(shadows)
+            and all(len(acc["holdings"]) >= DAY_MAX_POSITIONS for acc in shadows.values())
+        )
+
+        if real_full and (not DAY_REAL_TRADING or all_shadow_full):
             return
 
-        candidates = []
+        long_real    = []
+        short_real   = []
+        long_shadow  = []
+        short_shadow = []
+
         for code in WATCH_STOCKS:
-            if code in self._state["holdings"]:
+            holdings = self._state["holdings"]
+            real_has = code in holdings or f"SHORT_{code}" in holdings
+            need_real = not real_full and not real_has
+
+            # 只要有任一影子帳戶還可入場就需要掃描
+            need_shadow = DAY_REAL_TRADING and any(
+                code not in acc["holdings"]
+                and f"SHORT_{code}" not in acc["holdings"]
+                and len(acc["holdings"]) < DAY_MAX_POSITIONS
+                for acc in shadows.values()
+            )
+
+            if not need_real and not need_shadow:
                 continue
+
             df = _fetch_intraday(code)
             if df is None or len(df) < 5:
                 continue
@@ -782,29 +1409,45 @@ class DayTrader:
             if not analysis:
                 continue
             self._update_watch_log(code, analysis)
-            avg_vol  = analysis.get("avg_volume", 0)
-            last_vol = analysis.get("last_volume", 0)
+            avg_vol   = analysis.get("avg_volume", 0)
+            last_vol  = analysis.get("last_volume", 0)
             vol_ratio = (last_vol / avg_vol) if avg_vol > 0 else 0
-            # 大量爆發（≥3x 均量）降低 score 門檻至 2；一般需 score≥3
-            score_threshold = 2 if vol_ratio >= VOL_SURGE_ALERT_X else 3
-            if analysis["score"] >= score_threshold:
-                # 量能硬性門檻：流動性不足直接跳過
-                if avg_vol < DAY_MIN_AVG_VOLUME:
-                    logger.debug(f"[DayTrader] {code} 均量不足 ({avg_vol:.0f} < {DAY_MIN_AVG_VOLUME})，跳過")
-                    continue
-                if last_vol < avg_vol * DAY_MIN_ENTRY_VOL_PCT:
-                    logger.debug(f"[DayTrader] {code} 進場K棒量太小 ({last_vol:.0f} < avg×{DAY_MIN_ENTRY_VOL_PCT})，跳過")
-                    continue
-                candidates.append((code, analysis["score"], analysis))
 
-        # 取得分最高的進場
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        for code, score, analysis in candidates:
+            if avg_vol < DAY_MIN_AVG_VOLUME:
+                continue
+            if last_vol < avg_vol * DAY_MIN_ENTRY_VOL_PCT:
+                continue
+
+            score_threshold = 2 if vol_ratio >= VOL_SURGE_ALERT_X else 3
+
+            if need_real:
+                if analysis["score"] >= score_threshold:
+                    if self._check_daytrade_eligible(code):
+                        long_real.append((code, analysis["score"], analysis))
+                if ENABLE_SHORT_TRADING:
+                    st = -(2 if vol_ratio >= VOL_SURGE_ALERT_X else 3)
+                    if (analysis["score"] <= st
+                            and not analysis["above_vwap"]
+                            and analysis.get("vol_delta_signal") == "sell"):
+                        if self._check_daytrade_eligible(code):
+                            short_real.append((code, analysis["score"], analysis))
+
+            if need_shadow:
+                if analysis["score"] >= score_threshold:
+                    long_shadow.append((code, analysis["score"], analysis))
+                if ENABLE_SHORT_TRADING:
+                    st = -(2 if vol_ratio >= VOL_SURGE_ALERT_X else 3)
+                    if (analysis["score"] <= st
+                            and not analysis["above_vwap"]
+                            and analysis.get("vol_delta_signal") == "sell"):
+                        short_shadow.append((code, analysis["score"], analysis))
+
+        # ── 真實多方進場 ──────────────────────────────────────────────────────
+        long_real.sort(key=lambda x: x[1], reverse=True)
+        for code, score, analysis in long_real:
             if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
                 break
             price = analysis["price"]
-
-            # ── Model confirmation ────────────────────────────────────────────
             predicted_gain: float | None = None
             if self._model is not None:
                 df_for_model = _fetch_intraday(code)
@@ -816,7 +1459,6 @@ class DayTrader:
                             f"model_pred={predicted_gain*100:.2f}% < threshold, skip"
                         )
                         continue
-
             logger.info(
                 f"[DayTrader] 📊 {code} score={score}"
                 f"  vwap={'↑' if analysis['above_vwap'] else '↓'}"
@@ -828,6 +1470,35 @@ class DayTrader:
                 + f"  @{price:.2f}"
             )
             self._paper_buy(code, price, analysis, predicted_gain)
+
+        # ── 真實空方進場 ──────────────────────────────────────────────────────
+        if ENABLE_SHORT_TRADING:
+            short_real.sort(key=lambda x: x[1])
+            for code, score, analysis in short_real:
+                if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
+                    break
+                price = analysis["price"]
+                logger.info(
+                    f"[DayTrader] 📊反沖 {code} score={score}"
+                    f"  vwap={'↑' if analysis['above_vwap'] else '↓'}"
+                    f"  delta={analysis['vol_delta_signal']}"
+                    f"  surge={'✓' if analysis['vol_surge'] else '✗'}"
+                    f"  @{price:.2f}"
+                )
+                self._paper_short(code, price, analysis)
+
+        # ── 影子帳戶獨立進場（不依賴真實帳戶，所有資本層同時嘗試）──────────
+        if DAY_REAL_TRADING:
+            long_shadow.sort(key=lambda x: x[1], reverse=True)
+            with self._lock:
+                for code, score, analysis in long_shadow:
+                    self.__create_shadow_long(code, analysis["price"], analysis)
+
+            if ENABLE_SHORT_TRADING:
+                short_shadow.sort(key=lambda x: x[1])
+                with self._lock:
+                    for code, score, analysis in short_shadow:
+                        self.__create_shadow_short(code, analysis["price"], analysis)
 
     # ── 只盯盤不交易（ENABLE_DAY_TRADING=false 時）────────────────────────────
 
@@ -900,8 +1571,11 @@ class DayTrader:
         self._alert_volume_surges()
 
         if ENABLE_DAY_TRADING:
-            self._confirm_pending_orders()   # 先確認上一輪的真實委託是否成交
+            self._confirm_pending_orders()        # 確認上一輪委託是否成交
+            self._sync_day_holdings_from_fubon()  # 以富邦庫存校正數量與成本價
             self._check_holdings()
+            if DAY_REAL_TRADING:
+                self._check_shadow_holdings()     # 影子帳戶獨立監控
             self._scan_entries()
             self._log_portfolio_status()
         else:
@@ -914,28 +1588,108 @@ class DayTrader:
         holdings = self._state["holdings"]
         if holdings:
             lines = []
-            for code, h in holdings.items():
-                df = _fetch_intraday(code)
+            for key, h in holdings.items():
+                is_short  = h.get("direction") == "short"
+                real_code = h.get("code", key) if is_short else key
+                df  = _fetch_intraday(real_code)
                 cur = float(df["Close"].iloc[-1]) if df is not None else h["entry_price"]
-                pnl = (cur - h["entry_price"]) * h["shares"]
-                lines.append(f"{code} {cur:.2f}({pnl:+,.0f})")
+                pnl = ((h["entry_price"] - cur) if is_short else (cur - h["entry_price"])) * h["shares"]
+                label    = f"S:{real_code}" if is_short else real_code
+                is_real  = h.get("is_real", False)
+                lines.append(f"{'[真]' if is_real else '[紙]'}{label} {cur:.2f}({pnl:+,.0f})")
             logger.info(f"[DayTrader] 持倉: {', '.join(lines)}  現金={self._state['cash']:,.0f}")
         else:
-            logger.info(f"[DayTrader] 無持倉  現金={self._state['cash']:,.0f}  今日損益={self._state['daily_pnl']:+,.0f}")
+            logger.info(
+                f"[DayTrader] 無持倉  現金={self._state['cash']:,.0f}"
+                f"  今日損益={self._state['daily_pnl']:+,.0f}"
+            )
+
+        if DAY_REAL_TRADING:
+            shadows = self._state.get("shadows", {})
+            for cap_key, acc in shadows.items():
+                cap = acc["initial"]
+                sh  = acc["holdings"]
+                sh_lines = []
+                for key, h in sh.items():
+                    is_short  = h.get("direction") == "short"
+                    real_code = h.get("code", key) if is_short else key
+                    df  = _fetch_intraday(real_code)
+                    cur = float(df["Close"].iloc[-1]) if df is not None else h["entry_price"]
+                    pnl = ((h["entry_price"] - cur) if is_short else (cur - h["entry_price"])) * h["shares"]
+                    label = f"S:{real_code}" if is_short else real_code
+                    sh_lines.append(f"{label} {cur:.2f}({pnl:+,.0f})")
+                if sh_lines:
+                    logger.info(
+                        f"[Shadow-{cap//10000}萬] 持倉: {', '.join(sh_lines)}"
+                        f"  現金={acc['cash']:,.0f}  損益={acc['pnl']:+,.0f}"
+                    )
+                else:
+                    logger.info(
+                        f"[Shadow-{cap//10000}萬] 無持倉"
+                        f"  現金={acc['cash']:,.0f}  損益={acc['pnl']:+,.0f}"
+                    )
+
+        self._send_monitoring_telegram()
+
+    def _send_monitoring_telegram(self):
+        """每次盯盤週期發送一則包含所有帳戶的 Telegram 匯總（15 分鐘冷卻）。"""
+        now = time.time()
+        if now - self._last_monitoring_tg_ts < 15 * 60:
+            return
+        try:
+            from utils.telegram_notify import send as tg_send
+            tw = self._now_tw()
+            lines = [f"📊 當沖盤況 {tw.strftime('%H:%M')}"]
+
+            # 真實帳戶
+            real_pnl  = self._state.get("daily_pnl", 0.0)
+            real_cash = self._state.get("cash", 0.0)
+            real_pos  = len(self._state.get("holdings", {}))
+            lines.append(
+                f"[真 {int(DAY_MAX_BUDGET)//10000}萬]"
+                f" 損益={real_pnl:+,.0f}"
+                f" 現金={real_cash:,.0f} | {real_pos}倉"
+            )
+
+            # 各影子帳戶
+            if DAY_REAL_TRADING:
+                for cap_key, acc in self._state.get("shadows", {}).items():
+                    cap = acc["initial"]
+                    lines.append(
+                        f"[紙{cap//10000:3d}萬]"
+                        f" 損益={acc['pnl']:+,.0f}"
+                        f" 現金={acc['cash']:,.0f}"
+                        f" | {len(acc['holdings'])}倉"
+                    )
+
+            msg = "\n".join(lines)
+            tg_send(msg, key="day_monitoring", cooldown=1)
+            self._last_monitoring_tg_ts = now
+        except Exception as e:
+            logger.debug(f"[DayTrader] 盯盤 Telegram 發送失敗: {e}")
 
     # ── 外部查詢 ─────────────────────────────────────────────────────────────
 
     def get_summary(self) -> dict:
         with self._lock:
             s = self._state
+            shadow_summary = {
+                cap_key: {
+                    "initial":   acc["initial"],
+                    "cash":      acc["cash"],
+                    "pnl":       acc["pnl"],
+                    "positions": len(acc["holdings"]),
+                }
+                for cap_key, acc in s.get("shadows", {}).items()
+            }
             return {
-                "date":       s.get("date"),
-                "cash":       s.get("cash", 0.0),
-                "daily_pnl":  s.get("daily_pnl", 0.0),
-                "positions":  len(s.get("holdings", {})),
-                "holdings":   dict(s.get("holdings", {})),
-                "trades_today": len([t for t in s.get("trade_log", [])
-                                     if True]),  # same-day already
-                "watch_count":  len(s.get("watch_log", {})),
-                "mode":        "paper_day_trade" if ENABLE_DAY_TRADING else "watch_only",
+                "date":          s.get("date"),
+                "cash":          s.get("cash", 0.0),
+                "daily_pnl":     s.get("daily_pnl", 0.0),
+                "positions":     len(s.get("holdings", {})),
+                "holdings":      dict(s.get("holdings", {})),
+                "trades_today":  len(s.get("trade_log", [])),
+                "watch_count":   len(s.get("watch_log", {})),
+                "mode":          "paper_day_trade" if ENABLE_DAY_TRADING else "watch_only",
+                "shadows":       shadow_summary,
             }

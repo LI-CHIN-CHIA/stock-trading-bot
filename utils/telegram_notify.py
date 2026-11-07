@@ -48,7 +48,7 @@ def send(msg: str, key: str | None = None, cooldown: int = _DEFAULT_COOLDOWN) ->
         with _sent_lock:
             if key in _sent and now - _sent[key] < timedelta(seconds=cooldown):
                 return False
-            _sent[key] = now
+        # cooldown key 只有在成功後才寫入，避免失敗時封鎖重試
 
     try:
         resp = requests.post(
@@ -59,9 +59,14 @@ def send(msg: str, key: str | None = None, cooldown: int = _DEFAULT_COOLDOWN) ->
         if not resp.ok:
             logger.warning(f"Telegram 發送失敗: {resp.status_code} {resp.text[:100]}")
             return False
+        if key:
+            with _sent_lock:
+                _sent[key] = datetime.now()
         return True
     except Exception as e:
-        logger.warning(f"Telegram 連線失敗: {e}")
+        # 去除例外訊息中可能含有 token 的 URL 片段
+        err_msg = str(e).replace(BOT_TOKEN, "***") if BOT_TOKEN else str(e)
+        logger.warning(f"Telegram 連線失敗: {err_msg}")
         return False
 
 

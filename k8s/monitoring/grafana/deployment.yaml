@@ -48,6 +48,21 @@ spec:
             - name: dashboard-gpu
               mountPath: /var/lib/grafana/dashboards/gpu.json
               subPath: gpu.json
+            - name: dashboard-tw
+              mountPath: /var/lib/grafana/dashboards/tw.json
+              subPath: tw.json
+            - name: dashboard-day
+              mountPath: /var/lib/grafana/dashboards/day.json
+              subPath: day.json
+            - name: dashboard-us
+              mountPath: /var/lib/grafana/dashboards/us.json
+              subPath: us.json
+            - name: dashboard-crypto
+              mountPath: /var/lib/grafana/dashboards/crypto.json
+              subPath: crypto.json
+            - name: dashboard-overnight
+              mountPath: /var/lib/grafana/dashboards/overnight.json
+              subPath: overnight.json
             - name: storage
               mountPath: /var/lib/grafana
       volumes:
@@ -66,6 +81,21 @@ spec:
         - name: dashboard-gpu
           configMap:
             name: grafana-dashboard-gpu
+        - name: dashboard-tw
+          configMap:
+            name: grafana-dashboard-tw
+        - name: dashboard-day
+          configMap:
+            name: grafana-dashboard-day
+        - name: dashboard-us
+          configMap:
+            name: grafana-dashboard-us
+        - name: dashboard-crypto
+          configMap:
+            name: grafana-dashboard-crypto
+        - name: dashboard-overnight
+          configMap:
+            name: grafana-dashboard-overnight
         - name: storage
           emptyDir: {}
 ---

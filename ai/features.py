@@ -103,27 +103,45 @@ def build_feature_matrix(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
     feats["macd_hist_change_lag1"] = feats["macd_hist_change"].shift(1)
 
     # ── Group 8: 三大法人（外資、投信、自營商）────────────────────────────────
+    _INST_COLS = [
+        "foreign_net_ratio",   "trust_net_ratio",   "dealer_net_ratio",
+        "institution_net_ratio",
+        "foreign_net_5d_ratio", "foreign_net_10d_ratio", "foreign_net_20d_ratio",
+        "trust_net_5d_ratio",   "trust_net_10d_ratio",   "trust_net_20d_ratio",
+        "institution_net_5d_ratio", "institution_net_10d_ratio", "institution_net_20d_ratio",
+        "foreign_buy_streak",  "trust_buy_streak",  "institution_buy_streak",
+        "foreign_vs_trust",
+    ]
     if code:
         try:
             from data.institutional import build_institutional_features
             inst = build_institutional_features(code, df)
-            for col in ["foreign_net_ratio", "trust_net_ratio",
-                        "institution_net_ratio", "foreign_buy_streak",
-                        "institution_buy_streak"]:
+            for col in _INST_COLS:
                 feats[col] = inst.get(col, 0.0)
         except Exception as e:
             logger.debug(f"三大法人特徵略過 {code}: {e}")
-            for col in ["foreign_net_ratio", "trust_net_ratio",
-                        "institution_net_ratio", "foreign_buy_streak",
-                        "institution_buy_streak"]:
+            for col in _INST_COLS:
                 feats[col] = 0.0
     else:
-        for col in ["foreign_net_ratio", "trust_net_ratio",
-                    "institution_net_ratio", "foreign_buy_streak",
-                    "institution_buy_streak"]:
+        for col in _INST_COLS:
             feats[col] = 0.0
 
-    # ── Group 9: K 線型態 ─────────────────────────────────────────────────────
+    # 企業事件旗標（training 時填 0，推理時由 prepare_inference_row 覆寫）
+    feats["capital_reduction_flag"] = 0.0
+    feats["buyback_active"]         = 0.0
+
+    # ── Group 9: 類股動能 ──────────────────────────────────────────────────────
+    _SECTOR_COLS = ["sector_ret_5d", "sector_ret_20d", "vs_sector_5d", "vs_sector_20d"]
+    try:
+        from ai.sector_features import load_sector_features
+        sect = load_sector_features(code, df)
+        for col in _SECTOR_COLS:
+            feats[col] = sect[col] if col in sect.columns else 0.0
+    except Exception:
+        for col in _SECTOR_COLS:
+            feats[col] = 0.0
+
+    # ── Group 10: K 線型態 ────────────────────────────────────────────────────
     body_high = df[["Close", "Open"]].max(axis=1)
     body_low  = df[["Close", "Open"]].min(axis=1)
     feats["upper_shadow_pct"]  = (df["High"] - body_high) / close.replace(0, np.nan)
@@ -156,7 +174,7 @@ def build_feature_matrix(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
         (abs(close - df["Open"]) > abs(close.shift(1) - df["Open"].shift(1)))
     ).astype(float)
 
-    # ── Group 10: 買賣力道估算 ────────────────────────────────────────────────
+    # ── Group 11: 買賣力道估算 ────────────────────────────────────────────────
     hl_range = (df["High"] - df["Low"]).replace(0, np.nan)
     # Williams 法估算：buy_pressure = (C-L)/(H-L)，0=全賣壓，1=全買壓
     buy_pres  = (close - df["Low"])  / hl_range
@@ -171,7 +189,7 @@ def build_feature_matrix(df: pd.DataFrame, code: str = "") -> pd.DataFrame:
         buy_vol.rolling(5).mean() / vol.rolling(5).mean().replace(0, np.nan)
     )
 
-    # ── Group 11: 社群情緒（訓練時填 0，推理時由 prepare_inference_row 覆寫）────
+    # ── Group 12: 社群情緒（訓練時填 0，推理時由 prepare_inference_row 覆寫）────
     feats["sentiment_score"] = 0.0
 
     # Drop warmup rows with NaN (need MA60 + lags + ROC10)
@@ -219,6 +237,16 @@ def prepare_inference_row(
         return feats
     row = feats.iloc[[-1]].copy()
     row["sentiment_score"] = float(np.clip(sentiment_score, -1.0, 1.0))
+
+    if code:
+        try:
+            from data.corp_events import get_event_flags
+            ev = get_event_flags(code)
+            row["capital_reduction_flag"] = float(ev.get("capital_reduction_flag", 0))
+            row["buyback_active"]         = float(ev.get("buyback_active", 0))
+        except Exception:
+            pass
+
     return row
 
 

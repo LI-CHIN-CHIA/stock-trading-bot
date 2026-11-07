@@ -89,6 +89,13 @@ def run_backtest(
     if verbose:
         print(f"✅ 成功取得 {len(raw_data)} 支")
 
+    # ── 計算類股動能快取（供 build_feature_matrix 使用）─────────────────────────
+    try:
+        from ai.sector_features import compute_sector_cache
+        compute_sector_cache(raw_data)
+    except Exception as _e:
+        logger.debug(f"sector cache 計算失敗: {_e}")
+
     # ── Prepare features ──────────────────────────────────────────────────────
     all_feat, all_target = [], []
     ticker_dfs: dict[str, tuple[pd.DataFrame, pd.Series]] = {}
