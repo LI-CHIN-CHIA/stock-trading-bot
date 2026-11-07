@@ -101,6 +101,30 @@ class SignalOut(BaseModel):
         from_attributes = True
 
 
+# ── Positions ─────────────────────────────────────────────────────────────────
+
+class PositionOut(BaseModel):
+    id: int
+    code: str
+    direction: str
+    shares: int
+    entry_price: float
+    is_real: bool
+    opened_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class PositionUpsert(BaseModel):
+    """Sent by Local Agent to open or close a position."""
+    code: str
+    direction: str = "LONG"   # LONG / SHORT
+    shares: int               # 0 = close the position
+    entry_price: float
+    is_real: bool = False
+
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 class DailySummary(BaseModel):

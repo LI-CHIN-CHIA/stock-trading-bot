@@ -1,11 +1,17 @@
-from datetime import date
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select
 from ..database import get_db
 from ..models import Trade, UserConfig
 from ..auth import get_current_user_id
 from ..schemas import TradeIn, TradeOut, DailySummary
+
+_TZ_TAIPEI = timezone(timedelta(hours=8))
+
+
+def _today_taipei() -> str:
+    return datetime.now(_TZ_TAIPEI).strftime("%Y-%m-%d")
 
 router = APIRouter(prefix="/api", tags=["trades"])
 
@@ -16,7 +22,7 @@ async def list_trades(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    d = trade_date or str(date.today())
+    d = trade_date or _today_taipei()
     rows = await db.scalars(
         select(Trade)
         .where(Trade.user_id == user_id, Trade.trade_date == d)
@@ -33,7 +39,7 @@ async def report_trade(
 ):
     trade = Trade(
         user_id=user_id,
-        trade_date=body.trade_date or str(date.today()),
+        trade_date=body.trade_date or _today_taipei(),
         code=body.code,
         action=body.action,
         shares=body.shares,
@@ -55,7 +61,7 @@ async def daily_summary(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    d = trade_date or str(date.today())
+    d = trade_date or _today_taipei()
     trades = (await db.scalars(
         select(Trade).where(Trade.user_id == user_id, Trade.trade_date == d)
     )).all()
