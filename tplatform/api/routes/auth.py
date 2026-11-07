@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from ..database import get_db
 from ..models import User, UserConfig
 from ..auth import hash_password, verify_password, create_token
@@ -15,10 +15,15 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # First user to register becomes admin
+    user_count = await db.scalar(select(func.count()).select_from(User))
+    is_admin = (user_count == 0)
+
     user = User(
         email=body.email,
         password_hash=hash_password(body.password),
         display_name=body.display_name or body.email.split("@")[0],
+        is_admin=is_admin,
     )
     db.add(user)
     await db.flush()
