@@ -19,6 +19,7 @@
 		A010 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F010 /* SettingsView.swift */; };
 		A011 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F011 /* MainTabView.swift */; };
 		A012 /* SignalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F012 /* SignalsView.swift */; };
+		A013 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F013 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 		F011 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		F012 /* SignalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalsView.swift; sourceTree = "<group>"; };
 		PROD001 /* TradingPlatform.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TradingPlatform.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F013 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -56,6 +58,7 @@
 			isa = PBXGroup;
 			children = (
 				F001,
+				F013,
 				GRP_MODELS,
 				GRP_SERVICES,
 				GRP_VIEWS,
@@ -87,7 +90,7 @@
 		TARGET1 = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = BCL1;
-			buildPhases = (PHASE_SRC,);
+			buildPhases = (PHASE_SRC, PHASE_RES,);
 			buildRules = ();
 			dependencies = ();
 			name = TradingPlatform;
@@ -128,11 +131,21 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXResourcesBuildPhase section */
+		PHASE_RES = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A013,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin XCBuildConfiguration section */
 		BC_DEBUG = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CODE_SIGN_STYLE = Automatic;
@@ -160,6 +173,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CODE_SIGN_STYLE = Automatic;
