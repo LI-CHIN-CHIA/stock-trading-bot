@@ -62,7 +62,7 @@ struct ConfigUpdate: Codable {
 
 // MARK: - Trade
 
-struct Trade: Codable, Identifiable {
+struct Trade: Codable, Identifiable, Equatable {
     let id: Int
     let tradeDate: String
     let code: String
@@ -116,7 +116,7 @@ struct Position: Codable, Identifiable {
 
 // MARK: - Signal
 
-struct Signal: Codable, Identifiable {
+struct Signal: Codable, Identifiable, Equatable {
     let id: Int
     let code: String
     let action: String

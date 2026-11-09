@@ -7,7 +7,7 @@ final class WSService: ObservableObject {
 
     @Published var latestTrade: Trade?
     @Published var latestSignal: Signal?
-    @Published var positionUpdate: (code: String, shares: Int)?
+    @Published var positionUpdate: PositionUpdate?
     @Published var isConnected: Bool = false
 
     private var task: URLSessionWebSocketTask?
@@ -91,7 +91,7 @@ final class WSService: ObservableObject {
 
         case "position_update":
             if let d = ws.data, let code = d.code, let shares = d.shares {
-                positionUpdate = (code: code, shares: shares)
+                positionUpdate = PositionUpdate(code: code, shares: shares)
             }
 
         case "ping":
@@ -115,4 +115,9 @@ final class WSService: ObservableObject {
             self?.connect()
         }
     }
+}
+
+struct PositionUpdate: Equatable {
+    let code: String
+    let shares: Int
 }
