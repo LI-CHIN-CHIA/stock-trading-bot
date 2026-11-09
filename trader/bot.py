@@ -1492,11 +1492,15 @@ class TradingBot:
                         real_holdings[code] = qty
 
             # 1a. 移除假持倉（本地有但帳戶沒有）
-            stale = [c for c in self.holdings if c not in real_holdings]
-            if stale:
-                logger.warning(f"⚠️  移除虛假持倉: {stale}")
-                for c in stale:
-                    del self.holdings[c]
+            # Guard: API 回空時不刪除（防止 API 延遲 / 暫時錯誤誤刪真實持倉）
+            if real_holdings:
+                stale = [c for c in self.holdings if c not in real_holdings]
+                if stale:
+                    logger.warning(f"⚠️  移除虛假持倉: {stale}")
+                    for c in stale:
+                        del self.holdings[c]
+            else:
+                logger.warning("⚠️  庫存 API 回傳空，跳過持倉同步（保留本地持倉）")
 
             # 1b. 取得真實成本價（從未實現損益 API）
             cost_map: dict[str, float] = {}

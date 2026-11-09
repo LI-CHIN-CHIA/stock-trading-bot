@@ -62,14 +62,24 @@ final class APIService: ObservableObject {
 
     // MARK: - Trades
 
-    func fetchTrades(date: String = "") async throws -> [Trade] {
-        let path = date.isEmpty ? "/api/trades" : "/api/trades?trade_date=\(date)"
-        return try await get(path)
+    func fetchTrades(date: String = "", days: Int = 1) async throws -> [Trade] {
+        if !date.isEmpty {
+            return try await get("/api/trades?trade_date=\(date)")
+        } else if days > 1 {
+            return try await get("/api/trades?days=\(days)")
+        } else {
+            return try await get("/api/trades")
+        }
     }
 
-    func fetchSummary(date: String = "") async throws -> DailySummary {
-        let path = date.isEmpty ? "/api/summary" : "/api/summary?trade_date=\(date)"
-        return try await get(path)
+    func fetchSummary(date: String = "", days: Int = 1) async throws -> DailySummary {
+        if !date.isEmpty {
+            return try await get("/api/summary?trade_date=\(date)")
+        } else if days > 1 {
+            return try await get("/api/summary?days=\(days)")
+        } else {
+            return try await get("/api/summary")
+        }
     }
 
     // MARK: - Positions

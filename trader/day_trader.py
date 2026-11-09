@@ -185,7 +185,11 @@ def _analyze_bars(df: pd.DataFrame) -> dict:
     above_vwap = price > vwap_val
 
     window = min(10, len(df))
-    delta_sum  = float(delta_ser.iloc[-window:].sum())
+    # 指數加權 Volume Delta：近期 K 棒權重較大（λ=1 → 最後一根權重最大）
+    raw_delta = delta_ser.iloc[-window:].values
+    weights   = np.exp(np.linspace(0, 1, len(raw_delta)))
+    delta_sum = float((raw_delta * weights).sum())
+
     avg_vol    = float(df["Volume"].iloc[-20:].mean()) if len(df) >= 20 else float(df["Volume"].mean())
     last_vol   = float(df["Volume"].iloc[-1])
     vol_surge  = last_vol > 2.5 * avg_vol
@@ -195,7 +199,8 @@ def _analyze_bars(df: pd.DataFrame) -> dict:
 
     pattern = _candle_pattern(df)
 
-    # ── 評分（-4 ~ +4）─────────────────────────────────────────────────────
+    # ── 評分（base -5 ~ +6，不含大盤加成）──────────────────────────────────
+    # 注意：大盤加成 (±1/±2) 在 _scan_entries 加入，使評分與市場方向解耦
     score = 0
     if above_vwap:
         score += 1
@@ -212,9 +217,9 @@ def _analyze_bars(df: pd.DataFrame) -> dict:
         vol_delta_signal = "neutral"
 
     if breakout:
-        score += 1
+        score += 2   # 突破 = 價格 + 大量雙確認，可信度最高給 +2
     if vol_surge:
-        score += 1  # 大量一律加分（方向已由 delta_sum 決定）
+        score += 1   # 大量本身也加分（方向已由 delta_sum 決定）
     if pattern == "hammer":
         score += 1
     elif pattern == "engulf_bull":
@@ -251,6 +256,47 @@ def _fetch_intraday(code: str) -> pd.DataFrame | None:
     except Exception as e:
         logger.debug(f"[DayTrader] {code} 資料擷取失敗: {e}")
         return None
+
+
+_mkt_dir_cache: dict = {"ts": 0.0, "dir": "FLAT", "gap": 0.0}
+
+
+def _fetch_mkt_direction() -> tuple[str, float]:
+    """Return ('UP'|'DOWN'|'FLAT', gap_pct). Cached 5 min.
+    gap_pct = (cur - prev_close) / prev_close, e.g. +0.012 means +1.2%."""
+    now = time.time()
+    if now - _mkt_dir_cache["ts"] < 300:
+        return _mkt_dir_cache["dir"], _mkt_dir_cache["gap"]
+    try:
+        df = yf.Ticker("^TWII").history(period="5d", interval="1d")
+        if len(df) < 2:
+            return "FLAT", 0.0
+        prev_close = float(df["Close"].iloc[-2])
+        cur = getattr(yf.Ticker("^TWII").fast_info, "last_price", None)
+        if not cur:
+            return "FLAT", 0.0
+        gap = (float(cur) - prev_close) / prev_close
+        d = "UP" if gap >= 0.003 else ("DOWN" if gap <= -0.003 else "FLAT")
+        _mkt_dir_cache.update({"ts": now, "dir": d, "gap": gap})
+        return d, gap
+    except Exception:
+        return "FLAT", 0.0
+
+
+def _mkt_score(gap: float) -> tuple[int, int]:
+    """Return (long_bonus, short_bonus) based on TWII gap magnitude.
+    大盤強漲 → 多方加分 / 空方扣分；強跌反之。
+    Thresholds: ±1 for 0.3%~1%, ±2 for >1%.
+    """
+    if gap >= 0.010:
+        return +2, -2
+    if gap >= 0.003:
+        return +1, -1
+    if gap <= -0.010:
+        return -2, +2
+    if gap <= -0.003:
+        return -1, +1
+    return 0, 0
 
 
 # ── 主類別 ────────────────────────────────────────────────────────────────────
@@ -295,6 +341,9 @@ class DayTrader:
         self._daytrade_cache:     dict   = {}    # code -> {date, status, quota, eligible}
         self._pending_buy_orders:  dict = {}   # order_no -> {code, shares, price, reserved_cash, analysis, predicted_gain, placed_at}
         self._pending_sell_orders: dict = {}   # order_no -> {code, shares, price, reason, placed_at}
+        # 從 state 還原（啟動後恢復未成交委託，避免重啟後遺漏）
+        self._pending_buy_orders  = self._state.pop("pending_buy",  {})
+        self._pending_sell_orders = self._state.pop("pending_sell", {})
         self._last_monitoring_tg_ts: float = 0.0  # 上次盯盤 Telegram 發送時間
         # 若啟動時已有持倉（跨週期 reload），立即啟動背景監控
         if self._state.get("holdings"):
@@ -469,6 +518,9 @@ class DayTrader:
 
     def _save_state(self):
         try:
+            # 寫入前把 pending orders 一併存入 state（啟動後可還原）
+            self._state["pending_buy"]  = dict(self._pending_buy_orders)
+            self._state["pending_sell"] = dict(self._pending_sell_orders)
             with open(_state_path(), "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2, default=str)
         except Exception as e:
@@ -493,6 +545,8 @@ class DayTrader:
             closed_pnl = self._state.get("daily_pnl", 0.0)
             self._state = self._new_state()
             self._state["date"] = today
+            self._pending_buy_orders  = {}
+            self._pending_sell_orders = {}
             logger.info(f"[DayTrader] 昨日損益 {closed_pnl:+,.0f} TWD")
 
     # ── 時間判斷 ──────────────────────────────────────────────────────────────
@@ -888,8 +942,14 @@ class DayTrader:
             shares = h["shares"]
             order_no = self._place_order_fn(code, "SELL", shares, price)
             if not order_no:
-                logger.warning(f"[DayTrader] ❌ {code} 真實賣單送出失敗，改紙上結算")
-                # fallthrough 到紙上邏輯
+                logger.warning(f"[DayTrader] ❌ {code} 真實賣單送出失敗，保留持倉等下次重試")
+                try:
+                    from utils.telegram_notify import send
+                    send(f"❌ <b>真實賣單失敗</b> {code}\n原因={reason}\n持倉已保留，下次觸發再試",
+                         key=f"sell_fail:{code}", cooldown=60)
+                except Exception:
+                    pass
+                return 0.0  # 保留持倉，不做紙上結算
             else:
                 # 從 holdings 移除（防止 fast monitor 觸發重複賣單），記錄 pending
                 holdings.pop(code)
@@ -1381,6 +1441,15 @@ class DayTrader:
         if real_full and (not DAY_REAL_TRADING or all_shadow_full):
             return
 
+        # 大盤方向加成：依 TWII 漲跌幅給多/空方各自的加分
+        mkt_dir, mkt_gap = _fetch_mkt_direction()
+        mkt_long_bonus, mkt_short_bonus = _mkt_score(mkt_gap)
+        if mkt_dir != "FLAT":
+            logger.info(
+                f"[DayTrader] 大盤 {mkt_dir}  gap={mkt_gap*100:+.2f}%"
+                f"  多方加成={mkt_long_bonus:+d}  空方加成={mkt_short_bonus:+d}"
+            )
+
         long_real    = []
         short_real   = []
         long_shadow  = []
@@ -1418,29 +1487,33 @@ class DayTrader:
             if last_vol < avg_vol * DAY_MIN_ENTRY_VOL_PCT:
                 continue
 
-            score_threshold = 2 if vol_ratio >= VOL_SURGE_ALERT_X else 3
+            # 加入大盤加成後的有效分數（用於進場判斷與排序）
+            eff_long  = analysis["score"] + mkt_long_bonus
+            eff_short = analysis["score"] + mkt_short_bonus
+
+            # 門檻：爆量時降 1 分（大量訊號本身已納入評分）
+            long_thr  = 2 if vol_ratio >= VOL_SURGE_ALERT_X else 3
+            short_thr = -(2 if vol_ratio >= VOL_SURGE_ALERT_X else 3)
 
             if need_real:
-                if analysis["score"] >= score_threshold:
+                if eff_long >= long_thr:
                     if self._check_daytrade_eligible(code):
-                        long_real.append((code, analysis["score"], analysis))
+                        long_real.append((code, eff_long, analysis))
                 if ENABLE_SHORT_TRADING:
-                    st = -(2 if vol_ratio >= VOL_SURGE_ALERT_X else 3)
-                    if (analysis["score"] <= st
+                    if (eff_short <= short_thr
                             and not analysis["above_vwap"]
                             and analysis.get("vol_delta_signal") == "sell"):
                         if self._check_daytrade_eligible(code):
-                            short_real.append((code, analysis["score"], analysis))
+                            short_real.append((code, eff_short, analysis))
 
             if need_shadow:
-                if analysis["score"] >= score_threshold:
-                    long_shadow.append((code, analysis["score"], analysis))
+                if eff_long >= long_thr:
+                    long_shadow.append((code, eff_long, analysis))
                 if ENABLE_SHORT_TRADING:
-                    st = -(2 if vol_ratio >= VOL_SURGE_ALERT_X else 3)
-                    if (analysis["score"] <= st
+                    if (eff_short <= short_thr
                             and not analysis["above_vwap"]
                             and analysis.get("vol_delta_signal") == "sell"):
-                        short_shadow.append((code, analysis["score"], analysis))
+                        short_shadow.append((code, eff_short, analysis))
 
         # ── 真實多方進場 ──────────────────────────────────────────────────────
         long_real.sort(key=lambda x: x[1], reverse=True)

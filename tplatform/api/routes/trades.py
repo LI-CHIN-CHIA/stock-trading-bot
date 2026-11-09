@@ -1,13 +1,14 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_type
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from ..database import get_db
 from ..models import Trade, UserConfig
 from ..auth import get_current_user_id
 from ..schemas import TradeIn, TradeOut, DailySummary
 
 _TZ_TAIPEI = timezone(timedelta(hours=8))
+_SYSTEM_USER = 1
 
 
 def _today_taipei() -> str:
@@ -19,15 +20,30 @@ router = APIRouter(prefix="/api", tags=["trades"])
 @router.get("/trades", response_model=list[TradeOut])
 async def list_trades(
     trade_date: str = "",
+    days: int = 1,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    d = trade_date or _today_taipei()
-    rows = await db.scalars(
-        select(Trade)
-        .where(Trade.user_id == user_id, Trade.trade_date == d)
-        .order_by(Trade.created_at.desc())
-    )
+    """
+    trade_date 指定時：只回傳該日。
+    未指定時依 days 決定範圍（days=1 只回今天，days=7 回最近 7 天）。
+    """
+    _user_filter = or_(Trade.user_id == user_id, Trade.user_id == _SYSTEM_USER)
+
+    if trade_date:
+        rows = await db.scalars(
+            select(Trade)
+            .where(and_(Trade.trade_date == trade_date, _user_filter))
+            .order_by(Trade.created_at.desc())
+        )
+    else:
+        today = datetime.now(_TZ_TAIPEI).date()
+        start = (today - timedelta(days=days - 1)).isoformat()
+        rows = await db.scalars(
+            select(Trade)
+            .where(and_(Trade.trade_date >= start, _user_filter))
+            .order_by(Trade.trade_date.desc(), Trade.created_at.desc())
+        )
     return rows.all()
 
 
@@ -58,13 +74,20 @@ async def report_trade(
 @router.get("/summary", response_model=DailySummary)
 async def daily_summary(
     trade_date: str = "",
+    days: int = 1,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    d = trade_date or _today_taipei()
-    trades = (await db.scalars(
-        select(Trade).where(Trade.user_id == user_id, Trade.trade_date == d)
-    )).all()
+    _user_filter = or_(Trade.user_id == user_id, Trade.user_id == _SYSTEM_USER)
+    if trade_date:
+        condition = and_(Trade.trade_date == trade_date, _user_filter)
+        d = trade_date
+    else:
+        today = datetime.now(_TZ_TAIPEI).date()
+        start = (today - timedelta(days=days - 1)).isoformat()
+        condition = and_(Trade.trade_date >= start, _user_filter)
+        d = _today_taipei()
+    trades = (await db.scalars(select(Trade).where(condition))).all()
 
     cfg = await db.scalar(select(UserConfig).where(UserConfig.user_id == user_id))
     budget = cfg.day_budget if cfg else 50000.0
