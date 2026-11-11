@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import psycopg2
 import pytz
 import yfinance as yf
 
@@ -62,7 +63,8 @@ _STT_RATE        = 0.0015     # 證交稅 0.15%（當沖減半）
 _MIN_FEE         = 20         # 最低手續費 20 元
 
 # 真實下單旗標
-DAY_REAL_TRADING = os.getenv("DAY_REAL_TRADING", "false").lower() == "true"
+DAY_REAL_TRADING  = os.getenv("DAY_REAL_TRADING", "false").lower() == "true"
+TRADING_USER_ID   = int(os.getenv("TRADING_USER_ID", "0"))   # 0 = 停用 DB 設定查詢
 DAY_MAX_BUDGET    = float(os.getenv("DAY_MAX_BUDGET",    "50000"))   # 單筆最高金額 NTD（真實）
 DAY_SHADOW_BUDGET = float(os.getenv("DAY_SHADOW_BUDGET", "160000"))  # 影子帳戶單筆預算（已棄用，保留相容）
 _SHADOW_CAPS_STR  = os.getenv("DAY_SHADOW_CAPITALS", "500000,1000000,1500000,2000000,2500000,3000000,3500000,4000000,4500000,5000000")
@@ -258,7 +260,68 @@ def _fetch_intraday(code: str) -> pd.DataFrame | None:
         return None
 
 
+_user_config_cache: dict = {
+    "ts":             0.0,
+    "auto_trade":     True,
+    "stop_loss_pct":  DAY_STOP_LOSS_PCT,
+    "take_profit_pct":DAY_TAKE_PROFIT_PCT,
+    "day_budget":     DAY_INITIAL_CAPITAL * DAY_PER_TRADE_PCT,
+    "max_positions":  DAY_MAX_POSITIONS,
+}
+
+
+def _fetch_user_config() -> dict:
+    """查詢 platform DB 中該 user 的所有交易設定。快取 60 秒。
+    若 TRADING_USER_ID=0 或 DB 不可達，回傳模組預設值（不中斷交易）。
+    """
+    if not TRADING_USER_ID:
+        return _user_config_cache
+    now = time.time()
+    if now - _user_config_cache["ts"] < 60:
+        return _user_config_cache
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("PLATFORM_DB_HOST", "postgres"),
+            port=int(os.getenv("PLATFORM_DB_PORT", "5432")),
+            dbname=os.getenv("PLATFORM_DB_NAME", "trading"),
+            user=os.getenv("PLATFORM_DB_USER", "trading"),
+            password=os.getenv("PLATFORM_DB_PASS", ""),
+            connect_timeout=3,
+        )
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT auto_trade, stop_loss_pct, take_profit_pct, day_budget, max_positions"
+                    " FROM platform_configs WHERE user_id = %s LIMIT 1",
+                    (TRADING_USER_ID,),
+                )
+                row = cur.fetchone()
+        conn.close()
+        if row:
+            prev_auto = _user_config_cache["auto_trade"]
+            _user_config_cache.update({
+                "ts":             now,
+                "auto_trade":     bool(row[0]),
+                "stop_loss_pct":  float(row[1]),
+                "take_profit_pct":float(row[2]),
+                "day_budget":     float(row[3]),
+                "max_positions":  int(row[4]),
+            })
+            if not row[0] and prev_auto:
+                logger.info(f"[DayTrader] 自動下單已由 user_id={TRADING_USER_ID} 在 App 關閉")
+        else:
+            _user_config_cache["ts"] = now
+    except Exception as e:
+        logger.debug(f"[DayTrader] DB 查詢 user_config 失敗，沿用上次設定: {e}")
+    return _user_config_cache
+
+
+def _fetch_user_auto_trade() -> bool:
+    return _fetch_user_config()["auto_trade"]
+
+
 _mkt_dir_cache: dict = {"ts": 0.0, "dir": "FLAT", "gap": 0.0}
+_us_overnight_cache: dict = {"date": "", "dir": "NEUTRAL", "spx": 0.0, "ndx": 0.0}
 
 
 def _fetch_mkt_direction() -> tuple[str, float]:
@@ -283,20 +346,55 @@ def _fetch_mkt_direction() -> tuple[str, float]:
         return "FLAT", 0.0
 
 
-def _mkt_score(gap: float) -> tuple[int, int]:
-    """Return (long_bonus, short_bonus) based on TWII gap magnitude.
-    大盤強漲 → 多方加分 / 空方扣分；強跌反之。
-    Thresholds: ±1 for 0.3%~1%, ±2 for >1%.
+def _fetch_us_overnight() -> tuple[str, float, float]:
+    """Return ('BULL'|'BEAR'|'NEUTRAL', spx_pct, ndx_pct). Cached per calendar day.
+
+    台灣交易時段（9:00-13:30 UTC+8）美股已收盤，取前一個美股交易日表現
+    作為當日台股開盤方向的結構性參考。
+    """
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    if _us_overnight_cache["date"] == today:
+        return _us_overnight_cache["dir"], _us_overnight_cache["spx"], _us_overnight_cache["ndx"]
+    try:
+        spx_df = yf.Ticker("^GSPC").history(period="5d", interval="1d")
+        ndx_df = yf.Ticker("^IXIC").history(period="5d", interval="1d")
+        if len(spx_df) < 2 or len(ndx_df) < 2:
+            return "NEUTRAL", 0.0, 0.0
+        spx_pct = float((spx_df["Close"].iloc[-1] - spx_df["Close"].iloc[-2]) / spx_df["Close"].iloc[-2])
+        ndx_pct = float((ndx_df["Close"].iloc[-1] - ndx_df["Close"].iloc[-2]) / ndx_df["Close"].iloc[-2])
+        avg = (spx_pct + ndx_pct) / 2
+        d = "BULL" if avg >= 0.003 else ("BEAR" if avg <= -0.003 else "NEUTRAL")
+        _us_overnight_cache.update({"date": today, "dir": d, "spx": spx_pct, "ndx": ndx_pct})
+        return d, spx_pct, ndx_pct
+    except Exception:
+        return "NEUTRAL", 0.0, 0.0
+
+
+def _mkt_score(gap: float, us_dir: str = "NEUTRAL") -> tuple[int, int]:
+    """Return (long_bonus, short_bonus) based on TWII gap + US overnight conviction.
+
+    基礎分數依 TWII gap 大小決定（±1 for 0.3%~1%, ±2 for >1%）。
+    當 TWII 與美股方向衝突時（開高走低/開低走高風險），多方或空方信心降 1。
     """
     if gap >= 0.010:
-        return +2, -2
-    if gap >= 0.003:
-        return +1, -1
-    if gap <= -0.010:
-        return -2, +2
-    if gap <= -0.003:
-        return -1, +1
-    return 0, 0
+        base_long, base_short = +2, -2
+    elif gap >= 0.003:
+        base_long, base_short = +1, -1
+    elif gap <= -0.010:
+        base_long, base_short = -2, +2
+    elif gap <= -0.003:
+        base_long, base_short = -1, +1
+    else:
+        base_long, base_short = 0, 0
+
+    # 美股方向確認：台股開高但美股昨夜收黑 → 開高走低風險 → 降低多方信心
+    # 台股開低但美股昨夜收紅 → 開低走高風險 → 降低空方信心
+    if gap >= 0.003 and us_dir == "BEAR":
+        base_long = max(0, base_long - 1)
+    elif gap <= -0.003 and us_dir == "BULL":
+        base_short = max(0, base_short - 1)
+
+    return base_long, base_short
 
 
 # ── 主類別 ────────────────────────────────────────────────────────────────────
@@ -603,23 +701,30 @@ class DayTrader:
 
         # 真實下單路徑（非阻塞，等待下次 _confirm_pending_orders 確認成交）
         if DAY_REAL_TRADING and self._place_order_fn is not None:
-            order_no = self._place_order_fn(code, "BUY", shares, price)
-            if not order_no:
-                logger.warning(f"[DayTrader] ❌ {code} 真實買單送出失敗")
-                return False
-            # 預扣資金，成交後才建倉；若失敗/超時則退款
-            self._state["cash"] -= total_cost
-            self._pending_buy_orders[order_no] = {
-                "side": "BUY", "code": code, "shares": shares, "price": price,
-                "reserved_cash": total_cost, "analysis": analysis,
-                "predicted_gain": predicted_gain, "placed_at": time.time(),
-            }
-            logger.info(
-                f"[DayTrader] ⏳ 真實買單送出 {code} {shares}股 @{price:.2f}"
-                f"  上限={DAY_MAX_BUDGET:,.0f}  單號={order_no}"
-            )
-            return True
+            if not _fetch_user_auto_trade():
+                # App 已關閉自動下單 → fall-through 到紙上交易
+                logger.info(f"[DayTrader] ⏸ {code} 自動下單已關閉，改為紙上交易")
+            else:
+                order_no = self._place_order_fn(code, "BUY", shares, price)
+                if not order_no:
+                    logger.warning(f"[DayTrader] ❌ {code} 真實買單送出失敗")
+                    return False
+                # 預扣資金，成交後才建倉；若失敗/超時則退款
+                self._state["cash"] -= total_cost
+                self._pending_buy_orders[order_no] = {
+                    "side": "BUY", "code": code, "shares": shares, "price": price,
+                    "reserved_cash": total_cost, "analysis": analysis,
+                    "predicted_gain": predicted_gain, "placed_at": time.time(),
+                }
+                logger.info(
+                    f"[DayTrader] ⏳ 真實買單送出 {code} {shares}股 @{price:.2f}"
+                    f"  上限={DAY_MAX_BUDGET:,.0f}  單號={order_no}"
+                )
+                return True
 
+        _cfg = _fetch_user_config()
+        _sl  = _cfg["stop_loss_pct"]
+        _tp  = _cfg["take_profit_pct"]
         self._state["cash"] -= total_cost
         holdings[code] = {
             "shares":         shares,
@@ -628,11 +733,16 @@ class DayTrader:
             "entry_ts":       time.time(),
             "is_real":        False,  # 紙上買入，賣出不走真實委託
             "cost":           total_cost,   # 含買進手續費
-            "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
-            "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+            "stop_loss":      round(price * (1 + _sl), 2),
+            "take_profit":    round(price * (1 + _tp), 2),
             "predicted_gain": round(predicted_gain * 100, 3) if predicted_gain is not None else None,
         }
-        self._log_trade(code, "BUY", shares, price, "當沖買入", analysis, predicted_gain)
+        self._log_trade(code, "BUY", shares, price, "當沖買入", analysis, predicted_gain, is_real=False)
+        try:
+            from utils.platform_signal import report_position as _rpos
+            _rpos(TRADING_USER_ID, code, "LONG", shares, price, is_real=False)
+        except Exception:
+            pass
         gain_str = f"  model={predicted_gain*100:.2f}%" if predicted_gain is not None else ""
         logger.info(
             f"[DayTrader] 🟢 買入 {code}  {shares}股 @{price:.2f}"
@@ -680,10 +790,15 @@ class DayTrader:
                 "entry_ts":     time.time(),
                 "is_real":      False,
                 "proceeds":     sell_value - sell_fee - stt,   # 賣出淨收
-                "stop_loss":    round(price * (1 + abs(DAY_STOP_LOSS_PCT)), 2),   # 漲到這裡停損
-                "take_profit":  round(price * (1 - abs(DAY_TAKE_PROFIT_PCT)), 2), # 跌到這裡停利
+                "stop_loss":    round(price * (1 + abs(_fetch_user_config()["stop_loss_pct"])), 2),
+                "take_profit":  round(price * (1 - abs(_fetch_user_config()["take_profit_pct"])), 2),
             }
-            self._log_trade(code, "SHORT", shares, price, "反沖賣出", analysis)
+            self._log_trade(code, "SHORT", shares, price, "反沖賣出", analysis, is_real=False)
+            try:
+                from utils.platform_signal import report_position as _rpos
+                _rpos(TRADING_USER_ID, code, "SHORT", shares, price, is_real=False)
+            except Exception:
+                pass
             logger.info(
                 f"[DayTrader] 🔴 反沖空頭 {code}  {shares}股 @{price:.2f}"
                 f"  score={analysis.get('score')}  delta={analysis.get('vol_delta_signal')}"
@@ -710,7 +825,12 @@ class DayTrader:
             buy_fee  = max(_MIN_FEE, round(buy_back * _COMMISSION_RATE))
             pnl = h["proceeds"] - (buy_back + buy_fee)
             self._state["daily_pnl"] += pnl
-            self._log_trade(code, "COVER", shares, price, reason, {})
+            self._log_trade(code, "COVER", shares, price, reason, {}, is_real=False, pnl=pnl)
+            try:
+                from utils.platform_signal import report_position as _rpos
+                _rpos(TRADING_USER_ID, code, "SHORT", 0, price, is_real=False)
+            except Exception:
+                pass
             emoji = "🟩" if pnl >= 0 else "🟥"
             logger.info(
                 f"[DayTrader] {emoji} 反沖回補 {code}  {shares}股 @{price:.2f}"
@@ -747,8 +867,8 @@ class DayTrader:
                 "entry_time":  self._now_tw().strftime("%H:%M"),
                 "entry_ts":    time.time(),
                 "cost":        total,
-                "stop_loss":   round(price * (1 + DAY_STOP_LOSS_PCT), 2),
-                "take_profit": round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                "stop_loss":   round(price * (1 + _fetch_user_config()["stop_loss_pct"]), 2),
+                "take_profit": round(price * (1 + _fetch_user_config()["take_profit_pct"]), 2),
             }
             cap = acc["initial"]
             logger.info(
@@ -778,8 +898,8 @@ class DayTrader:
                 "entry_time":  self._now_tw().strftime("%H:%M"),
                 "entry_ts":    time.time(),
                 "proceeds":    sell_val - sell_fee - stt,
-                "stop_loss":   round(price * (1 + abs(DAY_STOP_LOSS_PCT)), 2),
-                "take_profit": round(price * (1 - abs(DAY_TAKE_PROFIT_PCT)), 2),
+                "stop_loss":   round(price * (1 + abs(_fetch_user_config()["stop_loss_pct"])), 2),
+                "take_profit": round(price * (1 - abs(_fetch_user_config()["take_profit_pct"])), 2),
             }
             cap = acc["initial"]
             logger.info(
@@ -976,7 +1096,12 @@ class DayTrader:
         pnl     = net_proceeds - cost
         self._state["cash"]      += net_proceeds
         self._state["daily_pnl"] += pnl
-        self._log_trade(code, "SELL", shares, price, reason, {})
+        self._log_trade(code, "SELL", shares, price, reason, {}, is_real=False, pnl=pnl)
+        try:
+            from utils.platform_signal import report_position as _rpos
+            _rpos(TRADING_USER_ID, code, "LONG", 0, price, is_real=False)
+        except Exception:
+            pass
         emoji = "🟩" if pnl >= 0 else "🟥"
         logger.info(
             f"[DayTrader] {emoji} 賣出 {code}  {shares}股 @{price:.2f}"
@@ -991,7 +1116,9 @@ class DayTrader:
 
     def _log_trade(self, code: str, side: str, shares: int,
                    price: float, reason: str, analysis: dict,
-                   predicted_gain: float | None = None):
+                   predicted_gain: float | None = None,
+                   is_real: bool = False, pnl: float = 0.0,
+                   order_no: str = ""):
         entry = {
             "time":            self._now_tw().strftime("%H:%M"),
             "code":            code,
@@ -999,12 +1126,29 @@ class DayTrader:
             "shares":          shares,
             "price":           price,
             "reason":          reason,
+            "is_real":         is_real,
+            "pnl":             round(pnl, 0),
             "score":           analysis.get("score"),
             "delta":           analysis.get("vol_delta_signal"),
             "pattern":         analysis.get("pattern"),
             "predicted_gain":  round(predicted_gain * 100, 3) if predicted_gain is not None else None,
         }
         self._state["trade_log"].append(entry)
+        try:
+            from utils.platform_signal import report_trade as _report
+            _report(
+                user_id=TRADING_USER_ID,
+                code=code,
+                action=side,
+                shares=shares,
+                price=price,
+                pnl=pnl,
+                reason=reason,
+                order_no=order_no,
+                is_real=is_real,
+            )
+        except Exception:
+            pass
 
     # ── 真實委託確認 ──────────────────────────────────────────────────────────
 
@@ -1044,11 +1188,16 @@ class DayTrader:
                         "entry_ts":       time.time(),
                         "is_real":        True,
                         "cost":           total,
-                        "stop_loss":      round(price * (1 + DAY_STOP_LOSS_PCT), 2),
-                        "take_profit":    round(price * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                        "stop_loss":      round(price * (1 + _fetch_user_config()["stop_loss_pct"]), 2),
+                        "take_profit":    round(price * (1 + _fetch_user_config()["take_profit_pct"]), 2),
                         "predicted_gain": round(o["predicted_gain"] * 100, 3) if o.get("predicted_gain") else None,
                     }
-                    self._log_trade(o["code"], "BUY", filled, price, "當沖買入(真實)", o.get("analysis") or {}, o.get("predicted_gain"))
+                    self._log_trade(o["code"], "BUY", filled, price, "當沖買入(真實)", o.get("analysis") or {}, o.get("predicted_gain"), is_real=True, order_no=order_no)
+                try:
+                    from utils.platform_signal import report_position as _rpos
+                    _rpos(TRADING_USER_ID, o["code"], "LONG", filled, price, is_real=True)
+                except Exception:
+                    pass
                 logger.info(f"[DayTrader] ✅ 買入確認 {o['code']} {filled}股 @{price:.2f}")
                 try:
                     from utils.telegram_notify import notify_buy
@@ -1101,7 +1250,12 @@ class DayTrader:
                 with self._lock:
                     self._state["cash"]      += net
                     self._state["daily_pnl"] += pnl
-                    self._log_trade(o["code"], "SELL", filled, price, o["reason"], {})
+                    self._log_trade(o["code"], "SELL", filled, price, o["reason"], {}, is_real=True, pnl=pnl, order_no=order_no)
+                try:
+                    from utils.platform_signal import report_position as _rpos
+                    _rpos(TRADING_USER_ID, o["code"], "LONG", 0, price, is_real=True)
+                except Exception:
+                    pass
                 emoji = "🟩" if pnl >= 0 else "🟥"
                 slip_str = (f"  滑價={fill_price - o['price']:+.2f}" if fill_price > 0 and abs(fill_price - o["price"]) > 0.01 else "")
                 logger.info(
@@ -1134,8 +1288,8 @@ class DayTrader:
                             "entry_ts":   o.get("entry_ts", time.time()),
                             "is_real": True,  # 賣單被拒，原始為真實持倉
                             "cost": o["cost"],
-                            "stop_loss":   round(ep * (1 + DAY_STOP_LOSS_PCT), 2),
-                            "take_profit": round(ep * (1 + DAY_TAKE_PROFIT_PCT), 2),
+                            "stop_loss":   round(ep * (1 + _fetch_user_config()["stop_loss_pct"]), 2),
+                            "take_profit": round(ep * (1 + _fetch_user_config()["take_profit_pct"]), 2),
                         }
             elif time.time() - o["placed_at"] > 60 and o.get("retries", 0) == 0:
                 # 60s 未成交：取消 + 以新價重試一次
@@ -1158,7 +1312,7 @@ class DayTrader:
                     with self._lock:
                         self._state["cash"]      += _net
                         self._state["daily_pnl"] += pnl_est
-                        self._log_trade(o["code"], "SELL", o["shares"], new_price, f"{o['reason']}(強制紙上)", {})
+                        self._log_trade(o["code"], "SELL", o["shares"], new_price, f"{o['reason']}(強制紙上)", {}, is_real=False, pnl=pnl_est)
                     logger.error(
                         f"[DayTrader] ❌ {o['code']} 賣單重試失敗，紙上強制結算 @{new_price:.2f}"
                         f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}"
@@ -1178,7 +1332,7 @@ class DayTrader:
                 with self._lock:
                     self._state["cash"]      += _net
                     self._state["daily_pnl"] += pnl_est
-                    self._log_trade(o["code"], "SELL", o["shares"], fp, f"{o['reason']}(強制紙上)", {})
+                    self._log_trade(o["code"], "SELL", o["shares"], fp, f"{o['reason']}(強制紙上)", {}, is_real=False, pnl=pnl_est)
                 logger.error(f"[DayTrader] ❌ {o['code']} 賣單兩次超時，紙上強制結算 @{fp:.2f}"
                              f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}")
                 sell_done.append(order_no)
@@ -1299,8 +1453,8 @@ class DayTrader:
                     if code in cost_map and abs(cost_map[code] - h["entry_price"]) > 0.05:
                         old_ep = h["entry_price"]
                         h["entry_price"] = cost_map[code]
-                        h["stop_loss"]   = round(cost_map[code] * (1 + DAY_STOP_LOSS_PCT), 2)
-                        h["take_profit"] = round(cost_map[code] * (1 + DAY_TAKE_PROFIT_PCT), 2)
+                        h["stop_loss"]   = round(cost_map[code] * (1 + _fetch_user_config()["stop_loss_pct"]), 2)
+                        h["take_profit"] = round(cost_map[code] * (1 + _fetch_user_config()["take_profit_pct"]), 2)
                         logger.info(
                             f"[DayTrader] 📋 成本修正 {code}"
                             f"  {old_ep:.2f} → {cost_map[code]:.2f}"
@@ -1368,7 +1522,7 @@ class DayTrader:
                         and entry_ts and (time.time() - entry_ts) > 300):
                     vwap_ser = _vwap(df)
                     vwap_val = float(vwap_ser.iloc[-1]) if not np.isnan(vwap_ser.iloc[-1]) else None
-                    if vwap_val and price > vwap_val and pct > DAY_STOP_LOSS_PCT:
+                    if vwap_val and price > vwap_val and pct > _fetch_user_config()["stop_loss_pct"]:
                         self._paper_cover(code, price, f"突破VWAP {vwap_val:.2f}")
                 continue
 
@@ -1411,7 +1565,7 @@ class DayTrader:
                     and entry_ts and (time.time() - entry_ts) > 300):
                 vwap_ser = _vwap(df)
                 vwap_val = float(vwap_ser.iloc[-1]) if not np.isnan(vwap_ser.iloc[-1]) else None
-                if vwap_val and price < vwap_val and pct > DAY_STOP_LOSS_PCT:
+                if vwap_val and price < vwap_val and pct > _fetch_user_config()["stop_loss_pct"]:
                     self._paper_sell(code, price, f"跌破VWAP {vwap_val:.2f}")
 
     # ── 盤況記錄（持續盯盤）──────────────────────────────────────────────────
@@ -1441,12 +1595,14 @@ class DayTrader:
         if real_full and (not DAY_REAL_TRADING or all_shadow_full):
             return
 
-        # 大盤方向加成：依 TWII 漲跌幅給多/空方各自的加分
+        # 大盤方向加成：依 TWII 漲跌幅 + 美股隔夜方向給多/空方各自的加分
         mkt_dir, mkt_gap = _fetch_mkt_direction()
-        mkt_long_bonus, mkt_short_bonus = _mkt_score(mkt_gap)
-        if mkt_dir != "FLAT":
+        us_dir, us_spx, us_ndx = _fetch_us_overnight()
+        mkt_long_bonus, mkt_short_bonus = _mkt_score(mkt_gap, us_dir)
+        if mkt_dir != "FLAT" or us_dir != "NEUTRAL":
             logger.info(
                 f"[DayTrader] 大盤 {mkt_dir}  gap={mkt_gap*100:+.2f}%"
+                f"  美股 {us_dir}(SPX={us_spx*100:+.2f}% NDX={us_ndx*100:+.2f}%)"
                 f"  多方加成={mkt_long_bonus:+d}  空方加成={mkt_short_bonus:+d}"
             )
 
@@ -1710,7 +1866,7 @@ class DayTrader:
                         f"  現金={acc['cash']:,.0f}  損益={acc['pnl']:+,.0f}"
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         f"[Shadow-{cap//10000}萬] 無持倉"
                         f"  現金={acc['cash']:,.0f}  損益={acc['pnl']:+,.0f}"
                     )

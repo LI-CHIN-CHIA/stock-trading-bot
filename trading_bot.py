@@ -18,8 +18,15 @@
 
 import logging
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
+
+# 抑制 yfinance/pandas 的第三方 warnings（Pandas4Warning 等無法修復的警告）
+warnings.filterwarnings("ignore", module=r"yfinance.*")
+warnings.filterwarnings("ignore", module=r"pandas.*")
+warnings.filterwarnings("ignore", message=r".*inplace.*")
+warnings.filterwarnings("ignore", message=r".*Pandas4Warning.*")
 
 import pytz
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -27,6 +34,10 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Fubon SDK (Rust) 預設會輸出大量 DEBUG tungstenite/ws_connector 訊息，只留 WARN 以上
+import os as _os
+_os.environ.setdefault("RUST_LOG", "warn")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 import os
@@ -51,6 +62,11 @@ TZ = pytz.timezone("Asia/Taipei")
 from trader.bot import TradingBot
 from trader.day_trader import DayTrader
 from trader.overnight_trader import OvernightTrader
+
+# yfinance.__init__ 在 import 時插入 'default' filter 覆蓋 PYTHONWARNINGS，
+# 在所有模組 import 後再次加回 ignore，讓它排在最前面覆蓋 yfinance 的 filter
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^yfinance")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^pandas")
 
 bot           = TradingBot()
 day_bot       = DayTrader()

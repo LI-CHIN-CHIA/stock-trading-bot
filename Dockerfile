@@ -42,4 +42,8 @@ COPY app.py dashboard.py trading_bot.py run_backtest.py ./
 ENV DATA_DIR=/data
 RUN mkdir -p /data /certs
 
+# patch yfinance utils.py：移除所有 inplace=True 呼叫，消除 Pandas4Warning
+COPY patch_yfinance.py /tmp/
+RUN python3 /tmp/patch_yfinance.py && rm /tmp/patch_yfinance.py
+
 CMD ["python", "trading_bot.py"]

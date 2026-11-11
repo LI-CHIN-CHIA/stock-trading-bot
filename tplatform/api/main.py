@@ -1,10 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .database import init_db
 from .routes import auth, config, trades, signals, positions, ws
+
+_STATIC = Path(__file__).parent.parent / "static"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -37,3 +41,8 @@ app.include_router(ws.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/app")
+async def pwa():
+    return FileResponse(_STATIC / "app.html", media_type="text/html")

@@ -1,14 +1,17 @@
+import os
 from datetime import datetime, timezone, timedelta, date as date_type
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select, and_
 from ..database import get_db
 from ..models import Trade, UserConfig
 from ..auth import get_current_user_id
-from ..schemas import TradeIn, TradeOut, DailySummary
+from ..schemas import TradeIn, TradeOut, DailySummary, SystemTradeIn
+from ..ws_hub import hub
+
+_SYSTEM_KEY = os.getenv("PLATFORM_SYSTEM_KEY", "")
 
 _TZ_TAIPEI = timezone(timedelta(hours=8))
-_SYSTEM_USER = 1
 
 
 def _today_taipei() -> str:
@@ -28,12 +31,10 @@ async def list_trades(
     trade_date 指定時：只回傳該日。
     未指定時依 days 決定範圍（days=1 只回今天，days=7 回最近 7 天）。
     """
-    _user_filter = or_(Trade.user_id == user_id, Trade.user_id == _SYSTEM_USER)
-
     if trade_date:
         rows = await db.scalars(
             select(Trade)
-            .where(and_(Trade.trade_date == trade_date, _user_filter))
+            .where(and_(Trade.trade_date == trade_date, Trade.user_id == user_id))
             .order_by(Trade.created_at.desc())
         )
     else:
@@ -41,7 +42,7 @@ async def list_trades(
         start = (today - timedelta(days=days - 1)).isoformat()
         rows = await db.scalars(
             select(Trade)
-            .where(and_(Trade.trade_date >= start, _user_filter))
+            .where(and_(Trade.trade_date >= start, Trade.user_id == user_id))
             .order_by(Trade.trade_date.desc(), Trade.created_at.desc())
         )
     return rows.all()
@@ -78,14 +79,13 @@ async def daily_summary(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    _user_filter = or_(Trade.user_id == user_id, Trade.user_id == _SYSTEM_USER)
     if trade_date:
-        condition = and_(Trade.trade_date == trade_date, _user_filter)
+        condition = and_(Trade.trade_date == trade_date, Trade.user_id == user_id)
         d = trade_date
     else:
         today = datetime.now(_TZ_TAIPEI).date()
         start = (today - timedelta(days=days - 1)).isoformat()
-        condition = and_(Trade.trade_date >= start, _user_filter)
+        condition = and_(Trade.trade_date >= start, Trade.user_id == user_id)
         d = _today_taipei()
     trades = (await db.scalars(select(Trade).where(condition))).all()
 
@@ -106,3 +106,46 @@ async def daily_summary(
         target_pnl=round(target_pnl, 0),
         hit_target=total_pnl >= target_pnl,
     )
+
+
+@router.post("/system/trades", response_model=TradeOut, status_code=201)
+async def system_report_trade(
+    body: SystemTradeIn,
+    db: AsyncSession = Depends(get_db),
+    x_system_key: str = Header(default=""),
+):
+    """Bot 回報交易紀錄（系統 key 認證，不需要 JWT）。"""
+    if not _SYSTEM_KEY or x_system_key != _SYSTEM_KEY:
+        raise HTTPException(status_code=401, detail="System key required")
+
+    trade = Trade(
+        user_id=body.user_id,
+        trade_date=body.trade_date or _today_taipei(),
+        code=body.code,
+        action=body.action,
+        shares=body.shares,
+        price=body.price,
+        pnl=body.pnl,
+        reason=body.reason,
+        order_no=body.order_no,
+        is_real=body.is_real,
+    )
+    db.add(trade)
+    await db.commit()
+    await db.refresh(trade)
+
+    await hub.send(body.user_id, {
+        "type": "trade",
+        "data": {
+            "id":         trade.id,
+            "trade_date": trade.trade_date,
+            "code":       trade.code,
+            "action":     trade.action,
+            "shares":     trade.shares,
+            "price":      float(trade.price),
+            "pnl":        float(trade.pnl),
+            "reason":     trade.reason,
+            "is_real":    trade.is_real,
+        },
+    })
+    return trade

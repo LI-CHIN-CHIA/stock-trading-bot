@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-bot
+  namespace: trading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trading-bot
+  template:
+    metadata:
+      labels:
+        app: trading-bot
+    spec:
+      containers:
+      - name: trading-bot
+        image: trading-bot:latest
+        imagePullPolicy: Never          # 使用本機 build 的 image
+        envFrom:
+        - configMapRef:
+            name: trading-config
+        - secretRef:
+            name: trading-secrets
+        env:
+        - name: PLATFORM_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_USER
+        - name: PLATFORM_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: state
+          mountPath: /data
+        - name: cert
+          mountPath: /certs
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: state
+        persistentVolumeClaim:
+          claimName: trading-state-pvc
+      - name: cert
+        secret:
+          secretName: fubon-cert
+      restartPolicy: Always

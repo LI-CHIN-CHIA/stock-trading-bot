@@ -184,8 +184,21 @@ struct TradeRow: View {
 
     var isBuy: Bool { trade.action == "BUY" || trade.action == "SHORT" }
 
+    var timeString: String {
+        // createdAt format: "2026-11-11T02:51:00.000000" (UTC) → "HH:mm"
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        guard let date = fmt.date(from: trade.createdAt) else { return "" }
+        let out = DateFormatter()
+        out.dateFormat = "HH:mm"
+        out.timeZone = TimeZone(identifier: "Asia/Taipei")
+        return out.string(from: date)
+    }
+
     var body: some View {
         HStack(spacing: 12) {
+            // Action badge
             Text(trade.action)
                 .font(.caption).bold()
                 .foregroundColor(.white)
@@ -193,7 +206,19 @@ struct TradeRow: View {
                 .background(Capsule().fill(isBuy ? Color.green : Color.red))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(trade.code).font(.headline)
+                HStack(spacing: 6) {
+                    Text(trade.code).font(.headline)
+                    // 真實 / 紙上 badge
+                    Text(trade.isReal ? "真實" : "紙上")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(trade.isReal ? .white : .secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(trade.isReal
+                                ? Color.blue.opacity(0.85)
+                                : Color(.systemGray5))
+                        )
+                }
                 Text(trade.reason).font(.caption).foregroundColor(.secondary)
                     .lineLimit(1)
             }
@@ -201,6 +226,10 @@ struct TradeRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
+                if !timeString.isEmpty {
+                    Text(timeString)
+                        .font(.caption2).foregroundColor(.secondary)
+                }
                 Text("\(trade.shares) 股")
                     .font(.subheadline)
                 Text("$ \(String(format: "%.1f", trade.price))")

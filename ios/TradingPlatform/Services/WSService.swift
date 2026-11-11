@@ -67,7 +67,7 @@ final class WSService: ObservableObject {
         case "connected":
             isConnected = true
 
-        case "trade_update":
+        case "trade", "trade_update":
             if let d = ws.data, let id = d.id, let code = d.code,
                let action = d.action, let shares = d.shares,
                let price = d.price, let pnl = d.pnl {

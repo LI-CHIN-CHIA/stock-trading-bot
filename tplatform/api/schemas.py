@@ -125,6 +125,30 @@ class PositionUpsert(BaseModel):
     is_real: bool = False
 
 
+# ── System (bot → platform) ───────────────────────────────────────────────────
+
+class SystemPositionUpsert(BaseModel):
+    user_id: int
+    code: str
+    direction: str = "LONG"   # LONG / SHORT
+    shares: int               # 0 = close the position
+    entry_price: float
+    is_real: bool = False
+
+
+class SystemTradeIn(BaseModel):
+    user_id: int
+    code: str
+    action: str           # BUY / SELL / SHORT / COVER
+    shares: int
+    price: float
+    pnl: float = 0.0
+    reason: str = ""
+    order_no: str = ""
+    is_real: bool = False
+    trade_date: str = ""  # YYYY-MM-DD; empty → today
+
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 class DailySummary(BaseModel):
