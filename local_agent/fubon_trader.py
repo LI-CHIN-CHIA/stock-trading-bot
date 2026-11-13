@@ -16,23 +16,29 @@ except ImportError:
 
 
 class FubonTrader:
-    def __init__(self, cert_path: str, cert_pass: str, account: str):
-        self._available = _HAS_SDK and bool(cert_path) and bool(cert_pass)
+    def __init__(self, cert_path: str, cert_pass: str, account: str, fubon_pass: str = ""):
+        # fubon_pass = 富邦網路交易登入密碼（≠ 憑證密碼）
+        # 若未傳入則從環境變數 FUBON_PASS 讀取
+        self._fubon_pass = fubon_pass or os.getenv("FUBON_PASS", "")
+        self._available = _HAS_SDK and bool(cert_path) and bool(cert_pass) and bool(self._fubon_pass)
         self._sdk = None
         self._account = account
+
+        if not self._fubon_pass:
+            logger.warning("[Fubon] 未設定 FUBON_PASS（富邦登入密碼），強制 paper 模式")
 
         if self._available:
             try:
                 sdk = FubonSDK()
-                sdk.login(cert_path, cert_pass, Mode.Normal)
-                accounts = sdk.stock.get_account()
-                if accounts.is_success:
-                    matched = next((a for a in accounts.data if a.account == account), None)
-                    self._account_obj = matched or accounts.data[0]
+                # 正確簽名: login(personal_id, password, cert_path, cert_pass)
+                # login() 回傳值的 .data 即帳號列表，不需另外呼叫 get_account()
+                r = sdk.login(account, self._fubon_pass, cert_path, cert_pass)
+                if r and r.data:
+                    self._account_obj = r.data[0]
                     self._sdk = sdk
                     logger.info(f"[Fubon] 登入成功 account={self._account_obj.account}")
                 else:
-                    logger.error(f"[Fubon] 取得帳號失敗: {accounts.message}")
+                    logger.error(f"[Fubon] 登入失敗：無帳號資料")
                     self._available = False
             except Exception as e:
                 logger.error(f"[Fubon] 登入失敗: {e}")
@@ -67,6 +73,19 @@ class FubonTrader:
         except Exception as e:
             logger.error(f"[Fubon] place_order error: {e}")
             return None
+
+    def check_short_quota(self, code: str) -> int:
+        """回傳可借券張數（lots）。0 = 無額度。SDK 不可用時回傳 999（允許 paper 模式）。"""
+        if not self.is_real:
+            return 999
+        try:
+            result = self._sdk.stock.margin_quota(self._account_obj, code)
+            if result.is_success:
+                return int(getattr(result.data, "shortsell_tradable_quota", 0))
+            return 0
+        except Exception as e:
+            logger.warning(f"[Fubon] check_short_quota {code} error: {e}")
+            return 0
 
     def check_filled(self, code: str, order_no: str) -> tuple[int, float]:
         """回傳 (filled_qty, filled_price)。0=未成交，-1=被拒。"""

@@ -83,8 +83,9 @@ class LocalAgent:
         if self.cfg.paper_mode or not self.cfg.cert_path:
             logger.info("[Agent] paper 模式（不下真實單）")
             return
-        cert_pass = os.getenv(self.cfg.cert_pass_env, "")
-        self._trader = FubonTrader(self.cfg.cert_path, cert_pass, self.cfg.fubon_account)
+        cert_pass  = os.getenv(self.cfg.cert_pass_env, "")
+        fubon_pass = os.getenv(self.cfg.fubon_pass_env, "")
+        self._trader = FubonTrader(self.cfg.cert_path, cert_pass, self.cfg.fubon_account, fubon_pass)
         if self._trader.is_real:
             logger.info("[Agent] 富邦 SDK 就緒，真實下單模式")
         else:
@@ -177,6 +178,14 @@ class LocalAgent:
 
         shares = self._shares_for(price) if action in ("BUY", "SHORT") else \
                  self._holdings.get(code, {}).get("shares", 1000)
+
+        # 空單前檢查借券額度（真實模式才有意義）
+        if action == "SHORT" and self._trader is not None and self._trader.is_real:
+            quota = self._trader.check_short_quota(code)
+            needed = shares // 1000  # lots
+            if quota < needed:
+                logger.warning(f"[Agent] {code} 借券額度不足（需要 {needed} 張，剩餘 {quota} 張），略過 SHORT")
+                return
 
         is_real = self._trader is not None and self._trader.is_real
 

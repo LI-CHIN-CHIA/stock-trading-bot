@@ -5,6 +5,7 @@ struct DashboardView: View {
     @EnvironmentObject var ws: WSService
     @State private var summary: DailySummary?
     @State private var config: TradingConfig?
+    @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
     @State private var errorMsg  = ""
 
@@ -27,9 +28,22 @@ struct DashboardView: View {
                     }
                     .padding(.horizontal)
 
+                    // 帳戶切換 + 額度
+                    if !accounts.isEmpty {
+                        AccountPicker(accounts: accounts)
+                        if let acc = accounts.first(where: { $0.id == api.selectedAccount }) {
+                            BudgetCard(account: acc, maxPositions: config?.maxPositions ?? 3)
+                        }
+                    }
+
                     // P&L card
                     if let s = summary {
                         PnLCard(summary: s)
+                    }
+
+                    // 所有帳戶今日比較
+                    if accounts.count > 1 {
+                        AccountsCompareCard(accounts: accounts)
                     }
 
                     // Config quick toggles
@@ -59,6 +73,8 @@ struct DashboardView: View {
             }
             .refreshable { load() }
             .onAppear { load() }
+            .onChange(of: api.selectedAccount) { _ in load() }
+            .onChange(of: ws.latestTrade) { _ in load() }
             .overlay {
                 if isLoading && summary == nil {
                     ProgressView("載入中...")
@@ -76,6 +92,7 @@ struct DashboardView: View {
         Task {
             isLoading = true
             do {
+                accounts = await loadAccounts(api)
                 async let s = api.fetchSummary()
                 async let c = api.fetchConfig()
                 summary = try await s
@@ -135,6 +152,82 @@ struct PnLCard: View {
     }
 }
 
+/// 目前選取帳戶的額度與使用狀況
+struct BudgetCard: View {
+    let account: TradingAccount
+    let maxPositions: Int
+
+    // 真實帳戶的 budget 是單筆額度，總額度 = 單筆 × 最大持倉
+    private var total: Double { account.isReal ? account.budget * Double(maxPositions) : account.budget }
+    private var ratio: Double { total > 0 ? min(account.used / total, 1) : 0 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(account.isReal ? "真實交易額度" : "模擬交易額度")
+                    .font(.subheadline).foregroundColor(.secondary)
+                Spacer()
+                Text(account.label)
+                    .font(.caption2).bold()
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill((account.isReal ? Color.orange : Color.blue).opacity(0.2)))
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text(formatWan(total)).font(.title2).bold()
+                if account.isReal {
+                    Text("（單筆 \(formatWan(account.budget)) × \(maxPositions) 檔）")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                Text("已用 \(Int(account.used)) 元")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            ProgressView(value: ratio)
+                .tint(account.isReal ? .orange : .blue)
+            HStack {
+                Text("今日報酬率").font(.caption).foregroundColor(.secondary)
+                Spacer()
+                Text(String(format: "%+.2f%%", account.pnlPct * 100))
+                    .font(.caption).bold()
+                    .foregroundColor(account.todayPnl >= 0 ? .green : .red)
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+        .padding(.horizontal)
+    }
+}
+
+/// 各帳戶今日損益並列
+struct AccountsCompareCard: View {
+    let accounts: [TradingAccount]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("各帳戶今日表現").font(.headline)
+            ForEach(accounts) { acc in
+                HStack {
+                    Circle().fill(acc.isReal ? Color.orange : Color.blue).frame(width: 8, height: 8)
+                    Text(acc.label).font(.subheadline)
+                    Spacer()
+                    Text("\(acc.tradeCount) 筆").font(.caption).foregroundColor(.secondary)
+                    Text("\(acc.todayPnl >= 0 ? "+" : "")\(Int(acc.todayPnl))")
+                        .font(.subheadline).bold()
+                        .foregroundColor(acc.todayPnl >= 0 ? .green : .red)
+                        .frame(minWidth: 70, alignment: .trailing)
+                    Text(String(format: "%+.2f%%", acc.pnlPct * 100))
+                        .font(.caption)
+                        .foregroundColor(acc.todayPnl >= 0 ? .green : .red)
+                        .frame(minWidth: 56, alignment: .trailing)
+                }
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+        .padding(.horizontal)
+    }
+}
+
 struct StatTile: View {
     let title: String
     let value: String
@@ -171,9 +264,16 @@ struct ConfigCard: View {
             }
 
             HStack {
-                Text("單筆額度").font(.subheadline).foregroundColor(.secondary)
+                Text("真實單筆額度").font(.subheadline).foregroundColor(.secondary)
                 Spacer()
-                Text("\(Int(config.dayBudget / 10000)) 萬").font(.subheadline)
+                Text(formatWan(config.dayBudget)).font(.subheadline)
+            }
+
+            HStack {
+                Text("模擬額度").font(.subheadline).foregroundColor(.secondary)
+                Spacer()
+                Text((config.paperBudgets ?? []).map { formatWan(Double($0)) }.joined(separator: "、"))
+                    .font(.subheadline)
             }
 
             HStack {
@@ -251,7 +351,7 @@ struct LatestTradeCard: View {
                 Text("\(trade.pnl >= 0 ? "+" : "")\(Int(trade.pnl)) 元")
                     .font(.subheadline).bold()
                     .foregroundColor(trade.pnl >= 0 ? .green : .red)
-                Text(trade.isReal ? "真實" : "模擬")
+                Text(accountLabel(trade.account, isReal: trade.isReal))
                     .font(.caption2)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Capsule().fill(trade.isReal ? Color.orange.opacity(0.2) : Color.blue.opacity(0.2)))
@@ -261,4 +361,50 @@ struct LatestTradeCard: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
         .padding(.horizontal)
     }
+}
+
+/// 帳戶切換列：真實 + 每個模擬額度各一顆，選取後其他頁面的資料跟著切換。
+struct AccountPicker: View {
+    @EnvironmentObject var api: APIService
+    let accounts: [TradingAccount]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(accounts) { acc in
+                    let selected = acc.id == api.selectedAccount
+                    Button {
+                        api.selectedAccount = acc.id
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: acc.isReal ? "banknote" : "doc.text")
+                                .font(.caption2)
+                            Text(acc.label).font(.subheadline)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .foregroundColor(selected ? .white : .primary)
+                        .background(
+                            Capsule().fill(selected
+                                ? (acc.isReal ? Color.orange : Color.blue)
+                                : Color(.secondarySystemBackground))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+}
+
+/// 載入帳戶清單，並確保 selectedAccount 指向存在的帳戶。
+@MainActor
+func loadAccounts(_ api: APIService) async -> [TradingAccount] {
+    let list = (try? await api.fetchAccounts()) ?? []
+    if !list.isEmpty, !list.contains(where: { $0.id == api.selectedAccount }) {
+        // 預設：今日有真實成交看真實，否則看第一個模擬帳戶
+        let real = list.first { $0.isReal && $0.tradeCount > 0 }
+        api.selectedAccount = (real ?? list.first { !$0.isReal } ?? list[0]).id
+    }
+    return list
 }

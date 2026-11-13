@@ -1,21 +1,40 @@
 import os
-from datetime import datetime, timezone, timedelta, date as date_type
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from ..database import get_db
-from ..models import Trade, UserConfig
+from ..models import Trade, Position, UserConfig
 from ..auth import get_current_user_id
-from ..schemas import TradeIn, TradeOut, DailySummary, SystemTradeIn
+from ..schemas import TradeIn, TradeOut, DailySummary, SystemTradeIn, AccountOut
 from ..ws_hub import hub
+from .. import accounts as acct
 
 _SYSTEM_KEY = os.getenv("PLATFORM_SYSTEM_KEY", "")
 
 _TZ_TAIPEI = timezone(timedelta(hours=8))
+_TARGET_PCT = 0.01   # 每日目標：額度的 1%（使用者目標區間 1%~2% 的下緣）
 
 
 def _today_taipei() -> str:
     return datetime.now(_TZ_TAIPEI).strftime("%Y-%m-%d")
+
+
+def _start_date(trade_date: str, days: int) -> str:
+    if trade_date:
+        return trade_date
+    today = datetime.now(_TZ_TAIPEI).date()
+    return (today - timedelta(days=max(days, 1) - 1)).isoformat()
+
+
+async def _cfg(db: AsyncSession, user_id: int) -> UserConfig | None:
+    return await db.scalar(select(UserConfig).where(UserConfig.user_id == user_id))
+
+
+def _stats(trades: list[Trade]) -> tuple[float, int, int]:
+    closes = [t for t in trades if t.action in ("SELL", "COVER")]
+    return sum(t.pnl for t in closes), len(closes), sum(1 for t in closes if t.pnl > 0)
+
 
 router = APIRouter(prefix="/api", tags=["trades"])
 
@@ -24,27 +43,23 @@ router = APIRouter(prefix="/api", tags=["trades"])
 async def list_trades(
     trade_date: str = "",
     days: int = 1,
+    account: str = "",
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    trade_date 指定時：只回傳該日。
-    未指定時依 days 決定範圍（days=1 只回今天，days=7 回最近 7 天）。
+    trade_date 指定時：只回傳該日；否則回傳最近 days 天。
+    account: "real" / "paper-<額度>" / "all"；未指定時回傳真實＋主要模擬帳戶（見 accounts.read_filter）。
     """
-    if trade_date:
-        rows = await db.scalars(
-            select(Trade)
-            .where(and_(Trade.trade_date == trade_date, Trade.user_id == user_id))
-            .order_by(Trade.created_at.desc())
-        )
-    else:
-        today = datetime.now(_TZ_TAIPEI).date()
-        start = (today - timedelta(days=days - 1)).isoformat()
-        rows = await db.scalars(
-            select(Trade)
-            .where(and_(Trade.trade_date >= start, Trade.user_id == user_id))
-            .order_by(Trade.trade_date.desc(), Trade.created_at.desc())
-        )
+    start = _start_date(trade_date, days)
+    only = acct.read_filter(account, await _cfg(db, user_id))
+    conds = [Trade.user_id == user_id,
+             Trade.trade_date == trade_date if trade_date else Trade.trade_date >= start]
+    if only is not None:
+        conds.append(Trade.account.in_(only))
+    rows = await db.scalars(
+        select(Trade).where(and_(*conds)).order_by(Trade.trade_date.desc(), Trade.created_at.desc())
+    )
     return rows.all()
 
 
@@ -65,6 +80,7 @@ async def report_trade(
         reason=body.reason,
         order_no=body.order_no,
         is_real=body.is_real,
+        account=acct.resolve_write(body.account, body.is_real, await _cfg(db, user_id)),
     )
     db.add(trade)
     await db.commit()
@@ -76,36 +92,72 @@ async def report_trade(
 async def daily_summary(
     trade_date: str = "",
     days: int = 1,
+    account: str = "",
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    if trade_date:
-        condition = and_(Trade.trade_date == trade_date, Trade.user_id == user_id)
-        d = trade_date
-    else:
-        today = datetime.now(_TZ_TAIPEI).date()
-        start = (today - timedelta(days=days - 1)).isoformat()
-        condition = and_(Trade.trade_date >= start, Trade.user_id == user_id)
-        d = _today_taipei()
-    trades = (await db.scalars(select(Trade).where(condition))).all()
+    start = _start_date(trade_date, days)
+    cfg = await _cfg(db, user_id)
+    only = acct.read_filter(account, cfg)
+    conds = [Trade.user_id == user_id,
+             Trade.trade_date == trade_date if trade_date else Trade.trade_date >= start]
+    if only is not None:
+        conds.append(Trade.account.in_(only))
+    trades = (await db.scalars(select(Trade).where(and_(*conds)))).all()
 
-    cfg = await db.scalar(select(UserConfig).where(UserConfig.user_id == user_id))
-    budget = cfg.day_budget if cfg else 50000.0
-
-    total_pnl  = sum(t.pnl for t in trades if t.action == "SELL")
-    sell_trades = [t for t in trades if t.action == "SELL"]
-    win_count  = sum(1 for t in sell_trades if t.pnl > 0)
-    target_pnl = budget * 0.02
+    budget = acct.budget_of(account, cfg)
+    total_pnl, n, wins = _stats(trades)
+    target_pnl = budget * _TARGET_PCT
 
     return DailySummary(
-        date=d,
+        account=account,
+        budget=budget,
+        date=trade_date or _today_taipei(),
         total_pnl=round(total_pnl, 0),
-        trade_count=len(sell_trades),
-        win_count=win_count,
-        win_rate=round(win_count / len(sell_trades), 4) if sell_trades else 0.0,
+        trade_count=n,
+        win_count=wins,
+        win_rate=round(wins / n, 4) if n else 0.0,
+        target_pct=_TARGET_PCT,
         target_pnl=round(target_pnl, 0),
         hit_target=total_pnl >= target_pnl,
     )
+
+
+@router.get("/accounts", response_model=list[AccountOut])
+async def list_accounts(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """真實帳戶 + 每個模擬額度各一個帳戶，附今日損益與持倉佔用。"""
+    cfg = await _cfg(db, user_id)
+    today = _today_taipei()
+    trades = (await db.scalars(
+        select(Trade).where(Trade.user_id == user_id, Trade.trade_date == today))).all()
+    positions = (await db.scalars(select(Position).where(Position.user_id == user_id))).all()
+
+    ids = [acct.REAL] + [acct.paper_id(b) for b in acct.paper_budgets(cfg)]
+    # 近 30 日有成交或目前有持倉的其他帳戶（策略帳戶如 fade-*、已從設定移除的模擬帳戶）也列出
+    since = (datetime.now(_TZ_TAIPEI).date() - timedelta(days=30)).isoformat()
+    recent = (await db.scalars(
+        select(Trade.account).where(Trade.user_id == user_id, Trade.trade_date >= since).distinct())).all()
+    for a in sorted(set(recent) | {p.account for p in positions}):
+        if a and a not in ids:
+            ids.append(a)
+
+    out = []
+    for a in ids:
+        budget = acct.budget_of(a, cfg)
+        pnl, n, wins = _stats([t for t in trades if t.account == a])
+        used = sum(p.shares * p.entry_price for p in positions if p.account == a)
+        target = budget * _TARGET_PCT
+        out.append(AccountOut(
+            id=a, kind="real" if a == acct.REAL else "paper", label=acct.label_of(a),
+            budget=budget, used=round(used, 0), today_pnl=round(pnl, 0),
+            pnl_pct=round(pnl / budget, 5) if budget else 0.0,
+            trade_count=n, win_count=wins, win_rate=round(wins / n, 4) if n else 0.0,
+            target_pnl=round(target, 0), hit_target=pnl >= target,
+        ))
+    return out
 
 
 @router.post("/system/trades", response_model=TradeOut, status_code=201)
@@ -129,6 +181,7 @@ async def system_report_trade(
         reason=body.reason,
         order_no=body.order_no,
         is_real=body.is_real,
+        account=acct.resolve_write(body.account, body.is_real, await _cfg(db, body.user_id)),
     )
     db.add(trade)
     await db.commit()
@@ -146,6 +199,7 @@ async def system_report_trade(
             "pnl":        float(trade.pnl),
             "reason":     trade.reason,
             "is_real":    trade.is_real,
+            "account":    trade.account,
         },
     })
     return trade

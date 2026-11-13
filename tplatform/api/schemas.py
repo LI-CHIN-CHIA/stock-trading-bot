@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -31,7 +31,14 @@ class ConfigResponse(BaseModel):
     max_positions: int
     stop_loss_pct: float
     take_profit_pct: float
+    paper_budgets: list[int] = [500000]
     updated_at: datetime
+
+    @field_validator("paper_budgets", mode="before")
+    @classmethod
+    def _split_budgets(cls, v):
+        from .accounts import parse_budgets
+        return parse_budgets(v)
 
     class Config:
         from_attributes = True
@@ -45,6 +52,7 @@ class ConfigUpdate(BaseModel):
     max_positions: int | None = None
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
+    paper_budgets: list[int] | None = None
 
 
 # ── Trades ───────────────────────────────────────────────────────────────────
@@ -58,6 +66,7 @@ class TradeIn(BaseModel):
     reason: str = ""
     order_no: str = ""
     is_real: bool = True
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
     trade_date: str = ""  # YYYY-MM-DD; empty → today
 
 class TradeOut(BaseModel):
@@ -71,6 +80,7 @@ class TradeOut(BaseModel):
     reason: str
     order_no: str
     is_real: bool
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
     created_at: datetime
 
     class Config:
@@ -110,6 +120,7 @@ class PositionOut(BaseModel):
     shares: int
     entry_price: float
     is_real: bool
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
     opened_at: datetime
     updated_at: datetime
 
@@ -123,6 +134,7 @@ class PositionUpsert(BaseModel):
     shares: int               # 0 = close the position
     entry_price: float
     is_real: bool = False
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
 
 
 # ── System (bot → platform) ───────────────────────────────────────────────────
@@ -134,6 +146,7 @@ class SystemPositionUpsert(BaseModel):
     shares: int               # 0 = close the position
     entry_price: float
     is_real: bool = False
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
 
 
 class SystemTradeIn(BaseModel):
@@ -146,17 +159,35 @@ class SystemTradeIn(BaseModel):
     reason: str = ""
     order_no: str = ""
     is_real: bool = False
+    account: str = ""     # "real" / "paper-<額度>"；空字串由伺服器依 is_real 歸戶
     trade_date: str = ""  # YYYY-MM-DD; empty → today
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
+class AccountOut(BaseModel):
+    id: str               # "real" / "paper-500000"
+    kind: str             # "real" / "paper"
+    label: str
+    budget: float         # 真實=單筆額度；模擬=帳戶總額度
+    used: float           # 目前持倉佔用金額
+    today_pnl: float
+    pnl_pct: float        # today_pnl / budget
+    trade_count: int
+    win_count: int
+    win_rate: float
+    target_pnl: float
+    hit_target: bool
+
+
 class DailySummary(BaseModel):
+    account: str = ""
+    budget: float = 0.0
     date: str
     total_pnl: float
     trade_count: int
     win_count: int
     win_rate: float
-    target_pct: float = 0.02
+    target_pct: float = 0.01
     target_pnl: float
     hit_target: bool

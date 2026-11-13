@@ -4,11 +4,15 @@ struct PositionsView: View {
     @EnvironmentObject var api: APIService
     @EnvironmentObject var ws: WSService
     @State private var positions: [Position] = []
+    @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
 
     var body: some View {
         NavigationView {
-            Group {
+            VStack(spacing: 0) {
+                if accounts.count > 1 {
+                    AccountPicker(accounts: accounts).padding(.vertical, 8)
+                }
                 if positions.isEmpty && !isLoading {
                     ContentUnavailableView("目前無持倉", systemImage: "tray")
                 } else {
@@ -30,12 +34,14 @@ struct PositionsView: View {
             .onAppear { load() }
             .overlay { if isLoading && positions.isEmpty { ProgressView("載入中...") } }
             .onChange(of: ws.positionUpdate) { _ in load() }
+            .onChange(of: api.selectedAccount) { _ in load() }
         }
     }
 
     private func load() {
         Task {
             isLoading = true
+            accounts = await loadAccounts(api)
             positions = (try? await api.fetchPositions()) ?? []
             isLoading = false
         }
@@ -64,7 +70,7 @@ struct PositionRow: View {
 
             VStack(alignment: .trailing, spacing: 2) {
                 Text("\(position.shares) 股").font(.subheadline)
-                Text(position.isReal ? "真實" : "模擬")
+                Text(accountLabel(position.account, isReal: position.isReal))
                     .font(.caption2)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Capsule().fill(position.isReal ? Color.orange.opacity(0.2) : Color.blue.opacity(0.2)))

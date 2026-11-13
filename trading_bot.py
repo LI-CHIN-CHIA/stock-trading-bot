@@ -70,6 +70,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^pandas"
 
 bot           = TradingBot()
 day_bot       = DayTrader()
+from trader.fade_trader import FadeTrader
+fade_bot      = FadeTrader()
 overnight_bot = OvernightTrader()
 
 
@@ -106,6 +108,10 @@ def job_day_trader():
         day_bot.run_cycle()
     except Exception as e:
         logger.error(f"當沖週期失敗: {e}", exc_info=True)
+    try:
+        fade_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"過熱放空週期失敗: {e}", exc_info=True)
 
 
 def job_overnight_trader():
@@ -576,6 +582,21 @@ def main():
         CronTrigger(hour=13, minute=20, day_of_week="mon-fri", timezone=TZ),
         id="close_scan", name="收盤掃描",
         max_instances=1, coalesce=True, misfire_grace_time=GRACE,
+    )
+
+    # 13:45 — 當日 1 分 K 存檔（供回測累積樣本）
+    def archive_bars():
+        try:
+            from utils.bar_archive import archive_today
+            archive_today()
+        except Exception as e:
+            logger.warning(f"1分K存檔失敗: {e}")
+
+    scheduler.add_job(
+        archive_bars,
+        CronTrigger(hour=13, minute=45, day_of_week="mon-fri", timezone=TZ),
+        id="archive_bars", name="1分K存檔",
+        misfire_grace_time=3600,
     )
 
     # 13:32 — 每日結算報告（收盤後立即 Telegram 戰報）

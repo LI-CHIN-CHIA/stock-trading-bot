@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var maxPos: Double = 3
     @State private var slPct: Double  = 1.5
     @State private var tpPct: Double  = 2.5
+    @State private var paperBudgets: [Int] = [500000]
+    @State private var newPaperWan: Double = 100
 
     var body: some View {
         NavigationView {
@@ -24,7 +26,40 @@ struct SettingsView: View {
                         Toggle("隔日沖", isOn: bindBool(\.enableOvernight))
                     }
 
-                    Section("資金管理") {
+                    Section(header: Text("模擬交易額度"),
+                            footer: Text("每個額度是一個獨立的模擬帳戶，單筆約用額度的三分之一；第一個為主要模擬帳戶。變更於下一個交易日生效，最多 6 個。")) {
+                        ForEach(paperBudgets, id: \.self) { b in
+                            HStack {
+                                Image(systemName: "doc.text").foregroundColor(.blue)
+                                Text("模擬 \(formatWan(Double(b)))")
+                                Spacer()
+                                if b == paperBudgets.first {
+                                    Text("主要").font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .onDelete { idx in
+                            guard paperBudgets.count > 1 else { return }
+                            paperBudgets.remove(atOffsets: idx)
+                            update(ConfigUpdate(paperBudgets: paperBudgets))
+                        }
+
+                        if paperBudgets.count < 6 {
+                            HStack {
+                                Stepper("新增 \(Int(newPaperWan)) 萬", value: $newPaperWan, in: 10...1000, step: 10)
+                                Button("加入") {
+                                    let v = Int(newPaperWan) * 10000
+                                    guard !paperBudgets.contains(v) else { return }
+                                    paperBudgets.append(v)
+                                    update(ConfigUpdate(paperBudgets: paperBudgets))
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
+
+                    Section(header: Text("真實交易額度"),
+                            footer: Text("真實下單每筆的金額上限；總額度 = 單筆額度 × 最大持倉數。")) {
                         HStack {
                             Text("單筆額度")
                             Spacer()
@@ -66,7 +101,7 @@ struct SettingsView: View {
                         Slider(value: $tpPct, in: 0.5...10.0, step: 0.5)
 
                         Button("儲存停損停利") {
-                            update(ConfigUpdate())
+                            update(ConfigUpdate(stopLossPct: -slPct / 100, takeProfitPct: tpPct / 100))
                         }
                     }
                 } else {
@@ -110,6 +145,7 @@ struct SettingsView: View {
                 maxPos = Double(cfg.maxPositions)
                 slPct  = abs(cfg.stopLossPct * 100)
                 tpPct  = cfg.takeProfitPct * 100
+                paperBudgets = cfg.paperBudgets ?? [500000]
             }
             isLoading = false
         }

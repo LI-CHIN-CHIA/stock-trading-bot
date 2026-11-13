@@ -48,6 +48,7 @@ def report_trade(
     reason: str = "",
     order_no: str = "",
     is_real: bool = False,
+    account: str = "",
 ) -> None:
     """POST a trade record to the platform in a background thread. Silently skips if not configured."""
     if not _URL or not _KEY or not user_id:
@@ -68,6 +69,7 @@ def report_trade(
                     "reason":   reason[:200],
                     "order_no": order_no,
                     "is_real":  is_real,
+                    "account":  account,
                 },
                 headers={"X-System-Key": _KEY},
                 timeout=3,
@@ -89,6 +91,7 @@ def report_position(
     shares: int,          # 0 = 平倉
     entry_price: float,
     is_real: bool = False,
+    account: str = "",
 ) -> None:
     """POST 開倉/平倉到 platform。Background thread，失敗不影響主流程。"""
     if not _URL or not _KEY or not user_id:
@@ -106,6 +109,7 @@ def report_position(
                     "shares":      shares,
                     "entry_price": round(float(entry_price), 2),
                     "is_real":     is_real,
+                    "account":     account,
                 },
                 headers={"X-System-Key": _KEY},
                 timeout=3,

@@ -4,7 +4,7 @@ import Foundation
 final class APIService: ObservableObject {
     static let shared = APIService()
 
-    @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL") ?? "http://192.168.1.100:30880"
+    @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL") ?? "http://100.108.171.87:30880"
     @Published var token: String = Keychain.load("jwt_token") ?? ""
     @Published var userId: Int = UserDefaults.standard.integer(forKey: "userId")
     @Published var displayName: String = UserDefaults.standard.string(forKey: "displayName") ?? ""
@@ -62,30 +62,40 @@ final class APIService: ObservableObject {
 
     // MARK: - Trades
 
+    /// 目前在 App 選取的帳戶（"real" / "paper-<額度>"）；空字串 = 由伺服器自動決定
+    @Published var selectedAccount: String = UserDefaults.standard.string(forKey: "selectedAccount") ?? "" {
+        didSet { UserDefaults.standard.set(selectedAccount, forKey: "selectedAccount") }
+    }
+
+    private func query(_ items: [(String, String)]) -> String {
+        let parts = items.filter { !$0.1.isEmpty }.map { "\($0.0)=\($0.1)" }
+        return parts.isEmpty ? "" : "?" + parts.joined(separator: "&")
+    }
+
+    func fetchAccounts() async throws -> [TradingAccount] {
+        try await get("/api/accounts")
+    }
+
     func fetchTrades(date: String = "", days: Int = 1) async throws -> [Trade] {
-        if !date.isEmpty {
-            return try await get("/api/trades?trade_date=\(date)")
-        } else if days > 1 {
-            return try await get("/api/trades?days=\(days)")
-        } else {
-            return try await get("/api/trades")
-        }
+        try await get("/api/trades" + query([
+            ("trade_date", date),
+            ("days", date.isEmpty && days > 1 ? String(days) : ""),
+            ("account", selectedAccount),
+        ]))
     }
 
     func fetchSummary(date: String = "", days: Int = 1) async throws -> DailySummary {
-        if !date.isEmpty {
-            return try await get("/api/summary?trade_date=\(date)")
-        } else if days > 1 {
-            return try await get("/api/summary?days=\(days)")
-        } else {
-            return try await get("/api/summary")
-        }
+        try await get("/api/summary" + query([
+            ("trade_date", date),
+            ("days", date.isEmpty && days > 1 ? String(days) : ""),
+            ("account", selectedAccount),
+        ]))
     }
 
     // MARK: - Positions
 
     func fetchPositions() async throws -> [Position] {
-        try await get("/api/positions")
+        try await get("/api/positions" + query([("account", selectedAccount)]))
     }
 
     // MARK: - Signals

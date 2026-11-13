@@ -17,7 +17,8 @@ class AgentConfig:
     token: str = ""                               # JWT token（login 後填入）
     cert_path: str = ""                           # 富邦憑證路徑（本機）
     cert_pass_env: str = "FUBON_CERT_PASS"        # 憑證密碼的環境變數名稱
-    fubon_account: str = ""                       # 富邦帳號
+    fubon_pass_env: str = "FUBON_PASS"            # 富邦登入密碼的環境變數名稱
+    fubon_account: str = ""                       # 富邦帳號（身分證號，用於 login）
     paper_mode: bool = True                       # True = 不下真實單
 
 

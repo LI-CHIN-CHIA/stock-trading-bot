@@ -37,6 +37,7 @@ class UserConfig(Base):
     max_positions:   Mapped[int]   = mapped_column(Integer, default=3)
     stop_loss_pct:   Mapped[float] = mapped_column(Float, default=-0.015)
     take_profit_pct: Mapped[float] = mapped_column(Float, default=0.025)
+    paper_budgets:   Mapped[str]   = mapped_column(String(200), default="500000", server_default="500000")
     updated_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="config")
@@ -69,6 +70,7 @@ class Trade(Base):
     reason:     Mapped[str]   = mapped_column(String(100), default="")
     order_no:   Mapped[str]   = mapped_column(String(50), default="")
     is_real:    Mapped[bool]  = mapped_column(Boolean, default=True)
+    account:    Mapped[str]   = mapped_column(String(24), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="trades")
@@ -85,6 +87,7 @@ class Position(Base):
     shares:      Mapped[int]      = mapped_column(Integer)
     entry_price: Mapped[float]    = mapped_column(Float)
     is_real:     Mapped[bool]     = mapped_column(Boolean, default=False)
+    account:     Mapped[str]      = mapped_column(String(24), default="", server_default="")
     opened_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

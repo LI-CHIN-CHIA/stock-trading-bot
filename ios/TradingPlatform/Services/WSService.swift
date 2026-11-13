@@ -75,7 +75,7 @@ final class WSService: ObservableObject {
                     id: id, tradeDate: "", code: code, action: action,
                     shares: shares, price: price, pnl: pnl,
                     reason: d.reason ?? "", orderNo: "",
-                    isReal: d.isReal ?? false, createdAt: ""
+                    isReal: d.isReal ?? false, account: d.account, createdAt: ""
                 )
             }
 

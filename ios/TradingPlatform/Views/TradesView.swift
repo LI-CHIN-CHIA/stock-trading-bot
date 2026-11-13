@@ -23,6 +23,7 @@ struct TradesView: View {
 
     @State private var trades: [Trade] = []
     @State private var summary: DailySummary? = nil
+    @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
     @State private var range: TradeRange = .today
 
@@ -44,6 +45,10 @@ struct TradesView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+
+                if accounts.count > 1 {
+                    AccountPicker(accounts: accounts).padding(.bottom, 8)
+                }
 
                 // ── Summary banner ────────────────────────────
                 if let s = summary {
@@ -88,6 +93,7 @@ struct TradesView: View {
             .refreshable { load() }
             .onAppear { load() }
             .onChange(of: range) { _ in load() }
+            .onChange(of: api.selectedAccount) { _ in load() }
             .onChange(of: ws.latestTrade) { _ in if range == .today { load() } }
         }
     }
@@ -95,6 +101,7 @@ struct TradesView: View {
     private func load() {
         Task {
             isLoading = true
+            accounts = await loadAccounts(api)
             async let t = api.fetchTrades(days: range.rawValue)
             async let s = api.fetchSummary(days: range.rawValue)
             trades  = (try? await t) ?? []
@@ -209,7 +216,7 @@ struct TradeRow: View {
                 HStack(spacing: 6) {
                     Text(trade.code).font(.headline)
                     // 真實 / 紙上 badge
-                    Text(trade.isReal ? "真實" : "紙上")
+                    Text(accountLabel(trade.account, isReal: trade.isReal))
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(trade.isReal ? .white : .secondary)
                         .padding(.horizontal, 5).padding(.vertical, 2)
