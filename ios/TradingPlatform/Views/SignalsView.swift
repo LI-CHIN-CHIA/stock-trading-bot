@@ -5,11 +5,15 @@ struct SignalsView: View {
     @EnvironmentObject var ws: WSService
     @State private var signals: [Signal] = []
     @State private var isLoading = false
+    @State private var errorMsg  = ""
 
     var body: some View {
         NavigationView {
             Group {
-                if signals.isEmpty && !isLoading {
+                if !errorMsg.isEmpty {
+                    ContentUnavailableView("信號載入失敗", systemImage: "exclamationmark.triangle",
+                                           description: Text(errorMsg))
+                } else if signals.isEmpty && !isLoading {
                     ContentUnavailableView("今日無信號", systemImage: "antenna.radiowaves.left.and.right")
                 } else {
                     List(signals) { sig in
@@ -36,7 +40,12 @@ struct SignalsView: View {
     private func load() {
         Task {
             isLoading = true
-            signals = (try? await api.fetchSignals()) ?? []
+            do {
+                signals = try await api.fetchSignals()
+                errorMsg = ""
+            } catch {
+                errorMsg = error.localizedDescription
+            }
             isLoading = false
         }
     }

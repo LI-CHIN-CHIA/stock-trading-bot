@@ -66,10 +66,11 @@ struct SettingsView: View {
                             Text("\(Int(budget / 10000)) 萬元")
                                 .foregroundColor(.secondary)
                         }
-                        Slider(value: $budget, in: 10000...500000, step: 10000)
-                            .onChange(of: budget) { v in
-                                update(ConfigUpdate(dayBudget: v))
-                            }
+                        // 放開滑桿才送出：拖動中每一格都送會產生大量請求，且完成順序不保證，
+                        // 伺服器可能存到中間值
+                        Slider(value: $budget, in: 10000...500000, step: 10000) { editing in
+                            if !editing { update(ConfigUpdate(dayBudget: budget)) }
+                        }
 
                         HStack {
                             Text("最大持倉數")
@@ -77,10 +78,9 @@ struct SettingsView: View {
                             Text("\(Int(maxPos)) 檔")
                                 .foregroundColor(.secondary)
                         }
-                        Slider(value: $maxPos, in: 1...10, step: 1)
-                            .onChange(of: maxPos) { v in
-                                update(ConfigUpdate(maxPositions: Int(v)))
-                            }
+                        Slider(value: $maxPos, in: 1...10, step: 1) { editing in
+                            if !editing { update(ConfigUpdate(maxPositions: Int(maxPos))) }
+                        }
                     }
 
                     Section("風控") {
@@ -139,16 +139,23 @@ struct SettingsView: View {
     private func load() {
         Task {
             isLoading = true
-            if let cfg = try? await api.fetchConfig() {
-                config = cfg
-                budget = cfg.dayBudget
-                maxPos = Double(cfg.maxPositions)
-                slPct  = abs(cfg.stopLossPct * 100)
-                tpPct  = cfg.takeProfitPct * 100
-                paperBudgets = cfg.paperBudgets ?? [500000]
+            do {
+                apply(try await api.fetchConfig())
+            } catch {
+                errorMsg = error.localizedDescription
             }
             isLoading = false
         }
+    }
+
+    /// 以伺服器的設定為準，同步所有編輯中的欄位
+    private func apply(_ cfg: TradingConfig) {
+        config = cfg
+        budget = cfg.dayBudget
+        maxPos = Double(cfg.maxPositions)
+        slPct  = abs(cfg.stopLossPct * 100)
+        tpPct  = cfg.takeProfitPct * 100
+        paperBudgets = cfg.paperBudgets ?? [500000]
     }
 
     private func bindBool(_ kp: WritableKeyPath<TradingConfig, Bool>) -> Binding<Bool> {
@@ -172,9 +179,13 @@ struct SettingsView: View {
     private func update(_ u: ConfigUpdate) {
         Task {
             do {
+                // 成功時只更新 config，不覆蓋其他尚未儲存的欄位（例如還沒按儲存的停損停利）
                 config = try await api.updateConfig(u)
+                errorMsg = ""
             } catch {
-                errorMsg = error.localizedDescription
+                errorMsg = "更新失敗：\(error.localizedDescription)"
+                // 畫面上的開關/額度已先改了，失敗時重新載入，避免顯示與伺服器不一致
+                load()
             }
         }
     }

@@ -25,6 +25,7 @@ struct TradesView: View {
     @State private var summary: DailySummary? = nil
     @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
+    @State private var errorMsg  = ""
     @State private var range: TradeRange = .today
 
     // trades grouped by date, sorted newest first
@@ -61,7 +62,10 @@ struct TradesView: View {
 
                 // ── Trade list ────────────────────────────────
                 Group {
-                    if isLoading && trades.isEmpty {
+                    if !errorMsg.isEmpty {
+                        ContentUnavailableView("交易紀錄載入失敗", systemImage: "exclamationmark.triangle",
+                                               description: Text(errorMsg))
+                    } else if isLoading && trades.isEmpty {
                         ProgressView("載入中...").frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if trades.isEmpty {
                         ContentUnavailableView(
@@ -104,7 +108,12 @@ struct TradesView: View {
             accounts = await loadAccounts(api)
             async let t = api.fetchTrades(days: range.rawValue)
             async let s = api.fetchSummary(days: range.rawValue)
-            trades  = (try? await t) ?? []
+            do {
+                trades = try await t
+                errorMsg = ""
+            } catch {
+                errorMsg = error.localizedDescription
+            }
             summary = try? await s
             isLoading = false
         }
@@ -186,17 +195,27 @@ private struct DateHeader: View {
 
 // MARK: - Trade Row
 
+/// 解析伺服器的 created_at。後端欄位是帶時區的 UTC 時間，輸出可能是
+/// "...T02:51:00.123456Z"、"...+00:00"，或沒有時區／沒有小數秒（Python 在微秒為 0 時省略）。
+private func parseServerDate(_ s: String) -> Date? {
+    let fmt = DateFormatter()
+    fmt.locale = Locale(identifier: "en_US_POSIX")
+    fmt.timeZone = TimeZone(identifier: "UTC")  // 沒有時區標記時視為 UTC
+    for f in ["yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX", "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+              "yyyy-MM-dd'T'HH:mm:ss.SSSSSS", "yyyy-MM-dd'T'HH:mm:ss"] {
+        fmt.dateFormat = f
+        if let d = fmt.date(from: s) { return d }
+    }
+    return nil
+}
+
 struct TradeRow: View {
     let trade: Trade
 
     var isBuy: Bool { trade.action == "BUY" || trade.action == "SHORT" }
 
     var timeString: String {
-        // createdAt format: "2026-11-11T02:51:00.000000" (UTC) → "HH:mm"
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        guard let date = fmt.date(from: trade.createdAt) else { return "" }
+        guard let date = parseServerDate(trade.createdAt) else { return "" }
         let out = DateFormatter()
         out.dateFormat = "HH:mm"
         out.timeZone = TimeZone(identifier: "Asia/Taipei")

@@ -68,9 +68,11 @@ struct LoginView: View {
         isLoading = true
         errorMsg = ""
 
-        if !serverURL.isEmpty {
-            api.serverURL = serverURL
-            UserDefaults.standard.set(serverURL, forKey: "serverURL")
+        let url = APIService.normalizeServerURL(serverURL)
+        if !url.isEmpty {
+            serverURL = url
+            api.serverURL = url
+            UserDefaults.standard.set(url, forKey: "serverURL")
         }
 
         Task {
@@ -80,7 +82,7 @@ struct LoginView: View {
                 } else {
                     try await api.register(email: email, password: password, displayName: "")
                 }
-                WSService.shared.connect()
+                // WebSocket 由 TradingPlatformApp 在主畫面出現時連線，這裡不重複呼叫
             } catch {
                 errorMsg = error.localizedDescription
             }

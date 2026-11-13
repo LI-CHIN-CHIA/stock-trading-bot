@@ -28,6 +28,16 @@ struct DashboardView: View {
                     }
                     .padding(.horizontal)
 
+                    if !errorMsg.isEmpty {
+                        Label(errorMsg, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.red.opacity(0.1)))
+                            .padding(.horizontal)
+                    }
+
                     // 帳戶切換 + 額度
                     if !accounts.isEmpty {
                         AccountPicker(accounts: accounts)
@@ -97,6 +107,7 @@ struct DashboardView: View {
                 async let c = api.fetchConfig()
                 summary = try await s
                 config  = try await c
+                errorMsg = ""
             } catch {
                 errorMsg = error.localizedDescription
             }
@@ -108,8 +119,9 @@ struct DashboardView: View {
         Task {
             do {
                 config = try await api.updateConfig(update)
+                errorMsg = ""
             } catch {
-                errorMsg = error.localizedDescription
+                errorMsg = "更新失敗：\(error.localizedDescription)"
             }
         }
     }
@@ -244,14 +256,21 @@ struct StatTile: View {
 struct ConfigCard: View {
     let config: TradingConfig
     let onUpdate: (ConfigUpdate) -> Void
+    @State private var confirmAutoTrade = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("交易設定").font(.headline).padding(.bottom, 2)
 
             HStack {
+                // 自動下單會送出真實委託，開啟前先確認，避免捲動時誤觸；關閉則立即生效
                 ToggleRow(label: "自動下單", value: config.autoTrade) { v in
-                    onUpdate(ConfigUpdate(autoTrade: v))
+                    if v { confirmAutoTrade = true } else { onUpdate(ConfigUpdate(autoTrade: false)) }
+                }
+                .confirmationDialog("開啟自動下單？", isPresented: $confirmAutoTrade, titleVisibility: .visible) {
+                    Button("開啟自動下單", role: .destructive) { onUpdate(ConfigUpdate(autoTrade: true)) }
+                } message: {
+                    Text("開啟後機器人會依信號自動送出真實委託。")
                 }
                 Spacer()
                 ToggleRow(label: "當沖", value: config.enableDay) { v in

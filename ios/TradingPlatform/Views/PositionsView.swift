@@ -6,6 +6,7 @@ struct PositionsView: View {
     @State private var positions: [Position] = []
     @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
+    @State private var errorMsg  = ""
 
     var body: some View {
         NavigationView {
@@ -13,7 +14,11 @@ struct PositionsView: View {
                 if accounts.count > 1 {
                     AccountPicker(accounts: accounts).padding(.vertical, 8)
                 }
-                if positions.isEmpty && !isLoading {
+                if !errorMsg.isEmpty {
+                    // 載入失敗不能顯示成「無持倉」，否則會誤以為已經沒有部位
+                    ContentUnavailableView("持倉載入失敗", systemImage: "exclamationmark.triangle",
+                                           description: Text(errorMsg))
+                } else if positions.isEmpty && !isLoading {
                     ContentUnavailableView("目前無持倉", systemImage: "tray")
                 } else {
                     List(positions) { pos in
@@ -42,7 +47,12 @@ struct PositionsView: View {
         Task {
             isLoading = true
             accounts = await loadAccounts(api)
-            positions = (try? await api.fetchPositions()) ?? []
+            do {
+                positions = try await api.fetchPositions()
+                errorMsg = ""
+            } catch {
+                errorMsg = error.localizedDescription
+            }
             isLoading = false
         }
     }

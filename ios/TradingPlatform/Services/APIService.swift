@@ -4,7 +4,7 @@ import Foundation
 final class APIService: ObservableObject {
     static let shared = APIService()
 
-    @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL") ?? "http://100.108.171.87:30880"
+    @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL") ?? "http://ljj-system-product-name:30880"
     @Published var token: String = Keychain.load("jwt_token") ?? ""
     @Published var userId: Int = UserDefaults.standard.integer(forKey: "userId")
     @Published var displayName: String = UserDefaults.standard.string(forKey: "displayName") ?? ""
@@ -113,40 +113,58 @@ final class APIService: ObservableObject {
         return h
     }
 
+    /// 去掉前後空白與結尾斜線，避免 "http://host/ " + "/api" 變成無效網址
+    static func normalizeServerURL(_ s: String) -> String {
+        var url = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        while url.hasSuffix("/") { url.removeLast() }
+        return url
+    }
+
+    private func makeURL(_ path: String) throws -> URL {
+        guard let url = URL(string: Self.normalizeServerURL(serverURL) + path),
+              url.scheme != nil, url.host != nil else {
+            throw APIError.server("Server URL 格式錯誤：\(serverURL)")
+        }
+        return url
+    }
+
     private func get<T: Decodable>(_ path: String) async throws -> T {
-        let url = URL(string: serverURL + path)!
-        var req = URLRequest(url: url, timeoutInterval: 15)
+        var req = URLRequest(url: try makeURL(path), timeoutInterval: 15)
         headers().forEach { req.setValue($1, forHTTPHeaderField: $0) }
         let (data, resp) = try await URLSession.shared.data(for: req)
-        try checkStatus(resp, data)
+        try checkStatus(resp, data, authed: true)
         return try decode(data)
     }
 
     private func post<B: Encodable, T: Decodable>(_ path: String, body: B, auth: Bool = true) async throws -> T {
-        let url = URL(string: serverURL + path)!
-        var req = URLRequest(url: url, timeoutInterval: 15)
+        var req = URLRequest(url: try makeURL(path), timeoutInterval: 15)
         req.httpMethod = "POST"
         if auth { headers().forEach { req.setValue($1, forHTTPHeaderField: $0) } }
         else { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         req.httpBody = try JSONEncoder().encode(body)
         let (data, resp) = try await URLSession.shared.data(for: req)
-        try checkStatus(resp, data)
+        try checkStatus(resp, data, authed: auth)
         return try decode(data)
     }
 
     private func put<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T {
-        let url = URL(string: serverURL + path)!
-        var req = URLRequest(url: url, timeoutInterval: 15)
+        var req = URLRequest(url: try makeURL(path), timeoutInterval: 15)
         req.httpMethod = "PUT"
         headers().forEach { req.setValue($1, forHTTPHeaderField: $0) }
         req.httpBody = try JSONEncoder().encode(body)
         let (data, resp) = try await URLSession.shared.data(for: req)
-        try checkStatus(resp, data)
+        try checkStatus(resp, data, authed: true)
         return try decode(data)
     }
 
-    private func checkStatus(_ resp: URLResponse, _ data: Data) throws {
+    private func checkStatus(_ resp: URLResponse, _ data: Data, authed: Bool) throws {
         guard let http = resp as? HTTPURLResponse else { return }
+        // 帶 token 的請求被拒 → token 過期或失效，回到登入畫面（登入本身的 401 是帳密錯誤，不處理）
+        if http.statusCode == 401 && authed && isLoggedIn {
+            WSService.shared.disconnect()
+            logout()
+            throw APIError.server("登入已過期，請重新登入")
+        }
         if http.statusCode >= 400 {
             let detail = (try? JSONDecoder().decode([String: String].self, from: data))?["detail"] ?? "HTTP \(http.statusCode)"
             throw APIError.server(detail)

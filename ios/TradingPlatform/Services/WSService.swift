@@ -19,17 +19,22 @@ final class WSService: ObservableObject {
 
     func connect() {
         guard !api.token.isEmpty, api.userId > 0 else { return }
-        let base = api.serverURL
+        let base = APIService.normalizeServerURL(api.serverURL)
             .replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://", with: "ws://")
         let urlStr = "\(base)/ws/\(api.userId)?token=\(api.token)"
         guard let url = URL(string: urlStr) else { return }
 
+        // 先關掉舊連線，避免同時存在多條 socket、每筆事件收到多次
+        task?.cancel(with: .goingAway, reason: nil)
+
         shouldReconnect = true
-        task = URLSession.shared.webSocketTask(with: url)
-        task?.resume()
-        isConnected = true
-        receive()
+        let newTask = URLSession.shared.webSocketTask(with: url)
+        task = newTask
+        newTask.resume()
+        // 真的收到伺服器訊息才算連線成功（見 receive）
+        isConnected = false
+        receive(on: newTask)
         startPing()
     }
 
@@ -38,20 +43,23 @@ final class WSService: ObservableObject {
         pingTimer?.invalidate()
         pingTimer = nil
         task?.cancel(with: .normalClosure, reason: nil)
+        task = nil
         isConnected = false
     }
 
-    private func receive() {
-        task?.receive { [weak self] result in
+    private func receive(on socket: URLSessionWebSocketTask) {
+        socket.receive { [weak self] result in
             Task { @MainActor in
-                guard let self else { return }
+                // 已被新連線取代或已斷線的舊 socket：忽略它的結果，也不要再排重連
+                guard let self, self.task === socket else { return }
                 switch result {
                 case .failure:
                     self.isConnected = false
                     self.scheduleReconnect()
                 case .success(let msg):
+                    self.isConnected = true
                     self.handle(msg)
-                    self.receive()
+                    self.receive(on: socket)
                 }
             }
         }
@@ -111,8 +119,11 @@ final class WSService: ObservableObject {
 
     private func scheduleReconnect() {
         guard shouldReconnect else { return }
+        let failed = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            self?.connect()
+            // 等待期間若已經重新連線（或登出），就不要再建一條
+            guard let self, self.shouldReconnect, self.task === failed else { return }
+            self.connect()
         }
     }
 }
