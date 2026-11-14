@@ -70,7 +70,7 @@ def find_candidates(codes=None) -> list[dict]:
             if not (FADE_GAP_MIN <= gap < FADE_GAP_MAX):
                 continue
             out.append({"code": code, "price": float(bars["Close"].iloc[-1]),
-                        "ret5": ret5, "gap": gap})
+                        "ret5": ret5, "gap": gap, "prev_close": prev_close})
         except Exception as e:
             logger.debug(f"[Fade] {code} 資料失敗: {e}")
         time.sleep(0.05)
@@ -125,6 +125,7 @@ class FadeTrader:
         proceeds = value - max(_MIN_FEE, round(value * _COMMISSION_RATE)) - round(value * _STT_RATE)
         h[code] = {"shares": shares, "entry_price": price, "proceeds": proceeds,
                    "entry_time": datetime.now(TZ).strftime("%H:%M"),
+                   "prev_close": c.get("prev_close"),
                    "stop": round(price * (1 + FADE_STOP_PCT), 2) if FADE_STOP_PCT > 0 else None}
         reason = f"過熱放空 5日{c['ret5']*100:+.1f}% 跳空{c['gap']*100:+.1f}%"
         self._report(code, "SHORT", shares, price, reason)
@@ -182,7 +183,12 @@ class FadeTrader:
             h = self._state["holdings"][code]
             with self._lock:
                 if hm >= _CLOSE_AT:
-                    self._cover(code, price, "收盤前回補 13:20")
+                    # 回測（backtest/fade_research.py）顯示約 15~18% 收在漲停，實盤多半補不回來、
+                    # 隔日回補平均虧 7~8%。紙上仍以現價結算，但標記出來，統計時要分開看。
+                    pc = h.get("prev_close")
+                    locked = bool(pc) and price >= pc * 1.095
+                    self._cover(code, price, "收盤前回補 13:20"
+                                + ("【漲停鎖死，實盤可能無法回補】" if locked else ""))
                 elif h.get("stop") and price >= h["stop"]:
                     self._cover(code, price, f"停損 {h['stop']:.2f}")
                 self._save()
