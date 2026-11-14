@@ -4,6 +4,9 @@
   近 5 日漲幅 ≥ FADE_RET5_MIN 且今日開盤跳空介於 FADE_GAP_MIN~FADE_GAP_MAX 的股票，
   開盤後放空，13:20 回補。回測中加停損會讓結果變差，故預設不設停損。
 
+2026-11-14 已停用（預設 ENABLE_FADE_TRADING=false）：400 檔回測把「收在漲停補不回來」算進去後
+每筆 −27bp（t=−4.5），見 backtest/fade_research.py。
+
 只做紙上交易；成交以帳戶 "fade-<額度>" 回報到 platform，App 上獨立顯示。
 已知風險：約 16% 的訊號當日收在漲停附近，真實空單可能無法回補。
 """
@@ -28,7 +31,7 @@ from trader.day_trader import (
 logger = logging.getLogger(__name__)
 TZ = pytz.timezone("Asia/Taipei")
 
-ENABLE_FADE     = os.getenv("ENABLE_FADE_TRADING", "true").lower() == "true"
+ENABLE_FADE     = os.getenv("ENABLE_FADE_TRADING", "false").lower() == "true"
 FADE_CAPITAL    = float(os.getenv("FADE_CAPITAL", "1000000"))
 FADE_PER_TRADE  = float(os.getenv("FADE_PER_TRADE_PCT", "0.33"))
 FADE_MAX_POS    = int(os.getenv("FADE_MAX_POSITIONS", "3"))
