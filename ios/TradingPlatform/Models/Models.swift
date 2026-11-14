@@ -75,7 +75,8 @@ struct TradingAccount: Codable, Identifiable, Equatable {
     let kind: String        // "real" / "paper"
     let label: String
     let budget: Double
-    let used: Double
+    let used: Double             // 目前持倉佔用金額（收盤平倉後為 0）
+    var tradedToday: Double?     // 今日進場成交金額合計
     let todayPnl: Double
     let pnlPct: Double
     let tradeCount: Int
@@ -88,6 +89,7 @@ struct TradingAccount: Codable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, kind, label, budget, used
+        case tradedToday = "traded_today"
         case todayPnl   = "today_pnl"
         case pnlPct     = "pnl_pct"
         case tradeCount = "trade_count"

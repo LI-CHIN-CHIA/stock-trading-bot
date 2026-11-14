@@ -20,11 +20,27 @@ def _today_taipei() -> str:
     return datetime.now(_TZ_TAIPEI).strftime("%Y-%m-%d")
 
 
-def _start_date(trade_date: str, days: int) -> str:
+def _date_conds(trade_date: str, days: int, start_date: str, end_date: str) -> list:
+    """日期條件，優先順序：trade_date（單日）> start_date/end_date（區間，含頭尾）> 最近 days 天。"""
+    for d in (trade_date, start_date, end_date):
+        if d:
+            try:
+                datetime.strptime(d, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"日期格式需為 YYYY-MM-DD: {d}")
     if trade_date:
-        return trade_date
+        return [Trade.trade_date == trade_date]
+    if start_date or end_date:
+        if start_date and end_date and start_date > end_date:
+            start_date, end_date = end_date, start_date
+        conds = []
+        if start_date:
+            conds.append(Trade.trade_date >= start_date)
+        if end_date:
+            conds.append(Trade.trade_date <= end_date)
+        return conds
     today = datetime.now(_TZ_TAIPEI).date()
-    return (today - timedelta(days=max(days, 1) - 1)).isoformat()
+    return [Trade.trade_date >= (today - timedelta(days=max(days, 1) - 1)).isoformat()]
 
 
 async def _cfg(db: AsyncSession, user_id: int) -> UserConfig | None:
@@ -43,18 +59,18 @@ router = APIRouter(prefix="/api", tags=["trades"])
 async def list_trades(
     trade_date: str = "",
     days: int = 1,
+    start_date: str = "",
+    end_date: str = "",
     account: str = "",
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    trade_date 指定時：只回傳該日；否則回傳最近 days 天。
+    trade_date 指定時只回傳該日；start_date/end_date 指定區間；否則回傳最近 days 天。
     account: "real" / "paper-<額度>" / "all"；未指定時回傳真實＋主要模擬帳戶（見 accounts.read_filter）。
     """
-    start = _start_date(trade_date, days)
     only = acct.read_filter(account, await _cfg(db, user_id))
-    conds = [Trade.user_id == user_id,
-             Trade.trade_date == trade_date if trade_date else Trade.trade_date >= start]
+    conds = [Trade.user_id == user_id, *_date_conds(trade_date, days, start_date, end_date)]
     if only is not None:
         conds.append(Trade.account.in_(only))
     rows = await db.scalars(
@@ -92,15 +108,15 @@ async def report_trade(
 async def daily_summary(
     trade_date: str = "",
     days: int = 1,
+    start_date: str = "",
+    end_date: str = "",
     account: str = "",
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    start = _start_date(trade_date, days)
     cfg = await _cfg(db, user_id)
     only = acct.read_filter(account, cfg)
-    conds = [Trade.user_id == user_id,
-             Trade.trade_date == trade_date if trade_date else Trade.trade_date >= start]
+    conds = [Trade.user_id == user_id, *_date_conds(trade_date, days, start_date, end_date)]
     if only is not None:
         conds.append(Trade.account.in_(only))
     trades = (await db.scalars(select(Trade).where(and_(*conds)))).all()
@@ -112,7 +128,7 @@ async def daily_summary(
     return DailySummary(
         account=account,
         budget=budget,
-        date=trade_date or _today_taipei(),
+        date=trade_date or (f"{start_date}~{end_date}" if (start_date or end_date) else _today_taipei()),
         total_pnl=round(total_pnl, 0),
         trade_count=n,
         win_count=wins,
@@ -149,10 +165,13 @@ async def list_accounts(
         budget = acct.budget_of(a, cfg)
         pnl, n, wins = _stats([t for t in trades if t.account == a])
         used = sum(p.shares * p.entry_price for p in positions if p.account == a)
+        traded = sum(t.shares * t.price for t in trades
+                     if t.account == a and t.action in ("BUY", "SHORT"))
         target = budget * _TARGET_PCT
         out.append(AccountOut(
             id=a, kind="real" if a == acct.REAL else "paper", label=acct.label_of(a),
-            budget=budget, used=round(used, 0), today_pnl=round(pnl, 0),
+            budget=budget, used=round(used, 0), traded_today=round(traded, 0),
+            today_pnl=round(pnl, 0),
             pnl_pct=round(pnl / budget, 5) if budget else 0.0,
             trade_count=n, win_count=wins, win_rate=round(wins / n, 4) if n else 0.0,
             target_pnl=round(target, 0), hit_target=pnl >= target,

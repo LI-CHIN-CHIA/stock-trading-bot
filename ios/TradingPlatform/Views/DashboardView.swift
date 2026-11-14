@@ -191,8 +191,11 @@ struct BudgetCard: View {
                         .font(.caption).foregroundColor(.secondary)
                 }
                 Spacer()
-                Text("已用 \(Int(account.used)) 元")
-                    .font(.caption).foregroundColor(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("持倉中 \(Int(account.used)) 元")
+                    Text("今日動用 \(Int(account.tradedToday ?? 0)) 元")
+                }
+                .font(.caption).foregroundColor(.secondary)
             }
             ProgressView(value: ratio)
                 .tint(account.isReal ? .orange : .blue)

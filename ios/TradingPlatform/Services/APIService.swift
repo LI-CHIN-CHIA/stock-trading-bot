@@ -76,20 +76,26 @@ final class APIService: ObservableObject {
         try await get("/api/accounts")
     }
 
-    func fetchTrades(date: String = "", days: Int = 1) async throws -> [Trade] {
-        try await get("/api/trades" + query([
+    /// start/end（YYYY-MM-DD，含頭尾）指定時優先於 days；兩者相同即為單日。
+    private func rangeQuery(date: String, days: Int, start: String, end: String) -> [(String, String)] {
+        let custom = !start.isEmpty || !end.isEmpty
+        return [
             ("trade_date", date),
-            ("days", date.isEmpty && days > 1 ? String(days) : ""),
+            ("start_date", date.isEmpty ? start : ""),
+            ("end_date", date.isEmpty ? end : ""),
+            ("days", date.isEmpty && !custom && days > 1 ? String(days) : ""),
             ("account", selectedAccount),
-        ]))
+        ]
     }
 
-    func fetchSummary(date: String = "", days: Int = 1) async throws -> DailySummary {
-        try await get("/api/summary" + query([
-            ("trade_date", date),
-            ("days", date.isEmpty && days > 1 ? String(days) : ""),
-            ("account", selectedAccount),
-        ]))
+    func fetchTrades(date: String = "", days: Int = 1,
+                     start: String = "", end: String = "") async throws -> [Trade] {
+        try await get("/api/trades" + query(rangeQuery(date: date, days: days, start: start, end: end)))
+    }
+
+    func fetchSummary(date: String = "", days: Int = 1,
+                      start: String = "", end: String = "") async throws -> DailySummary {
+        try await get("/api/summary" + query(rangeQuery(date: date, days: days, start: start, end: end)))
     }
 
     // MARK: - Positions

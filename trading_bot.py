@@ -108,6 +108,11 @@ def job_day_trader():
         day_bot.run_cycle()
     except Exception as e:
         logger.error(f"當沖週期失敗: {e}", exc_info=True)
+        try:
+            from utils.telegram_notify import send
+            send(f"🚨 <b>當沖週期例外</b>\n{type(e).__name__}: {str(e)[:200]}", key="day_cycle_exc", cooldown=600)
+        except Exception:
+            pass
     try:
         fade_bot.run_cycle()
     except Exception as e:

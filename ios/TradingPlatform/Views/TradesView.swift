@@ -3,14 +3,15 @@ import SwiftUI
 // MARK: - Range options
 
 private enum TradeRange: Int, CaseIterable, Identifiable {
-    case today = 1, week = 7, month = 30
+    case today = 1, week = 7, month = 30, custom = 0
 
     var id: Int { rawValue }
     var label: String {
         switch self {
-        case .today: return "今天"
-        case .week:  return "本週"
-        case .month: return "本月"
+        case .today:  return "今天"
+        case .week:   return "本週"
+        case .month:  return "本月"
+        case .custom: return "自訂"
         }
     }
 }
@@ -27,6 +28,17 @@ struct TradesView: View {
     @State private var isLoading = false
     @State private var errorMsg  = ""
     @State private var range: TradeRange = .today
+    // 自訂區間（含頭尾）；起訖選同一天即為單日
+    @State private var startDate = Date()
+    @State private var endDate   = Date()
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "Asia/Taipei")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 
     // trades grouped by date, sorted newest first
     private var grouped: [(date: String, trades: [Trade])] {
@@ -46,6 +58,20 @@ struct TradesView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+
+                if range == .custom {
+                    HStack(spacing: 8) {
+                        DatePicker("起", selection: $startDate, in: ...Date(), displayedComponents: .date)
+                            .labelsHidden()
+                        Text("～").foregroundColor(.secondary)
+                        DatePicker("迄", selection: $endDate, in: ...Date(), displayedComponents: .date)
+                            .labelsHidden()
+                        Spacer()
+                    }
+                    .environment(\.locale, Locale(identifier: "zh_TW"))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
 
                 if accounts.count > 1 {
                     AccountPicker(accounts: accounts).padding(.bottom, 8)
@@ -97,6 +123,8 @@ struct TradesView: View {
             .refreshable { load() }
             .onAppear { load() }
             .onChange(of: range) { _ in load() }
+            .onChange(of: startDate) { _ in if range == .custom { load() } }
+            .onChange(of: endDate) { _ in if range == .custom { load() } }
             .onChange(of: api.selectedAccount) { _ in load() }
             .onChange(of: ws.latestTrade) { _ in if range == .today { load() } }
         }
@@ -106,8 +134,11 @@ struct TradesView: View {
         Task {
             isLoading = true
             accounts = await loadAccounts(api)
-            async let t = api.fetchTrades(days: range.rawValue)
-            async let s = api.fetchSummary(days: range.rawValue)
+            let custom = range == .custom
+            let lo = custom ? Self.dayFormatter.string(from: min(startDate, endDate)) : ""
+            let hi = custom ? Self.dayFormatter.string(from: max(startDate, endDate)) : ""
+            async let t = api.fetchTrades(days: range.rawValue, start: lo, end: hi)
+            async let s = api.fetchSummary(days: range.rawValue, start: lo, end: hi)
             do {
                 trades = try await t
                 errorMsg = ""
@@ -129,7 +160,7 @@ private struct SummaryBanner: View {
     var body: some View {
         HStack(spacing: 0) {
             StatCell(
-                label: range == .today ? "今日損益" : "\(range.label)損益",
+                label: range == .today ? "今日損益" : (range == .custom ? "區間損益" : "\(range.label)損益"),
                 value: "\(summary.totalPnl >= 0 ? "+" : "")\(Int(summary.totalPnl))",
                 color: summary.totalPnl >= 0 ? .green : .red
             )

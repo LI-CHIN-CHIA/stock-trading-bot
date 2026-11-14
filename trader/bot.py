@@ -1213,7 +1213,18 @@ class TradingBot:
             order_type=OrderType.Stock,
             user_def="AI_BOT",
         )
-        result = self.sdk.stock.place_order(self.account, order)
+        try:
+            result = self.sdk.stock.place_order(self.account, order)
+        except Exception as e:
+            # 逾時 / 被限流 / 連線中斷：委託狀態不明，一律告警
+            logger.error(f"❌ 下單例外 {side} {code}: {e}")
+            try:
+                from utils.telegram_notify import send
+                send(f"🚨 <b>富邦下單例外</b> {side} {code} {shares}股\n{str(e)[:200]}\n"
+                     f"委託是否送出不明，請確認券商委託與庫存", key=f"order_exc:{code}:{side}", cooldown=120)
+            except Exception:
+                pass
+            return None
         relogged = False
         if not result.is_success and "Not Login" in (result.message or ""):
             logger.warning("⚠️  SDK Session 過期，嘗試重新登入後再試一次...")
@@ -1222,6 +1233,11 @@ class TradingBot:
                 relogged = True
             else:
                 logger.error(f"❌ SDK 重新登入失敗，無法下單 {side} {code}")
+                try:
+                    from utils.telegram_notify import send
+                    send(f"🚨 <b>富邦重新登入失敗</b>，無法下單 {side} {code}", key="relogin_fail", cooldown=300)
+                except Exception:
+                    pass
                 return None
         if result.is_success:
             seq_no = getattr(result.data, "seq_no", None) if result.data else None

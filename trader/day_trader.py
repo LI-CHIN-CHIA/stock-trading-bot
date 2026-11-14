@@ -667,7 +667,7 @@ class DayTrader:
 
     def _new_state(self) -> dict:
         return {
-            "date":           str(date.today()),
+            "date":           str(datetime.now(TZ).date()),
             "initial":        float(_paper_budgets()[0]),
             "cash":           float(_paper_budgets()[0]),
             "holdings":       {},
@@ -726,7 +726,7 @@ class DayTrader:
             logger.warning(f"[DayTrader] state 儲存失敗: {e}")
 
     def _reset_if_new_day(self):
-        today = str(date.today())
+        today = str(datetime.now(TZ).date())
         if self._state.get("date") != today:
             # 若有未平倉部位，先告警再清除（#4：避免靜默吞掉昨日倉位）
             leftover = self._state.get("holdings", {})
@@ -1262,6 +1262,33 @@ class DayTrader:
 
     # ── 真實委託確認 ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _alert(msg: str, key: str, cooldown: int = 300):
+        """真實下單異常一律 Telegram 告警（失敗不影響主流程）。"""
+        try:
+            from utils.telegram_notify import send
+            send(msg, key=key, cooldown=cooldown)
+        except Exception:
+            pass
+
+    def _requeue_real_holding(self, o: dict, shares: int | None = None, cost: float | None = None):
+        """賣單沒賣掉：把真實持倉放回 holdings 並標記 force_exit，下一輪立即再賣（需在 _lock 內呼叫）。"""
+        if o["code"] in self._state["holdings"]:
+            return
+        ep = o.get("entry_price", o["price"])
+        cfg = _fetch_user_config()
+        self._state["holdings"][o["code"]] = {
+            "shares": shares if shares is not None else o["shares"],
+            "entry_price": ep,
+            "entry_time": "??:??",
+            "entry_ts":   o.get("entry_ts", time.time()),
+            "is_real": True,
+            "cost": cost if cost is not None else o["cost"],
+            "stop_loss":   round(ep * (1 + cfg["stop_loss_pct"]), 2),
+            "take_profit": round(ep * (1 + cfg["take_profit_pct"]), 2),
+            "force_exit": o.get("reason", "重試賣出"),
+        }
+
     def _confirm_pending_orders(self):
         """
         查詢 pending 買/賣單是否成交（每 run_cycle 呼叫一次，在鎖外執行 API）。
@@ -1317,6 +1344,13 @@ class DayTrader:
                                f"score={score_str} {gain_str}".strip())
                 except Exception:
                     pass
+                if filled < o["shares"]:
+                    # 部分成交：取消剩餘委託，避免之後成交卻沒被追蹤
+                    if self._cancel_order_fn and not o.get("cancel_sent"):
+                        self._cancel_order_fn(o["code"], order_no)
+                    logger.warning(f"[DayTrader] ⚠️ 買單部分成交 {o['code']} {filled}/{o['shares']}股，已取消剩餘委託")
+                    self._alert(f"⚠️ <b>當沖買單部分成交</b> {o['code']}  {filled}/{o['shares']}股\n"
+                                f"剩餘委託已送取消，請確認券商庫存", key=f"buy_partial:{order_no}")
                 self._start_fast_monitor()
                 buy_done.append(order_no)
             elif filled == -1:
@@ -1331,12 +1365,17 @@ class DayTrader:
                     pass
                 buy_done.append(order_no)
             elif time.time() - o["placed_at"] > 120:
-                # 2 分鐘無成交：取消並退款
-                if self._cancel_order_fn:
-                    self._cancel_order_fn(o["code"], order_no)
+                # 2 分鐘無成交：先送取消，下一輪確認「取消前沒有成交」才退款
+                # （取消與成交可能同時發生；直接退款會留下沒人盯的真實持倉）
+                if not o.get("cancel_sent"):
+                    if self._cancel_order_fn:
+                        self._cancel_order_fn(o["code"], order_no)
+                    o["cancel_sent"] = True
+                    logger.warning(f"[DayTrader] ⏰ 買單超時，已送取消 {o['code']} {order_no}，下一輪確認")
+                    continue
                 with self._lock:
                     self._state["cash"] += o["reserved_cash"]
-                logger.warning(f"[DayTrader] ⏰ 買單超時取消 {o['code']} {order_no}")
+                logger.warning(f"[DayTrader] ⏰ 買單超時取消完成 {o['code']} {order_no}，已退款")
                 buy_done.append(order_no)
         for no in buy_done:
             del self._pending_buy_orders[no]
@@ -1356,14 +1395,26 @@ class DayTrader:
                 fee  = max(_MIN_FEE, round(proceeds * _COMMISSION_RATE))
                 stt  = round(proceeds * _STT_RATE)
                 net  = proceeds - fee - stt
-                pnl  = net - o["cost"]
+                remaining = max(o["shares"] - filled, 0)
+                # 部分成交：成本按比例分攤，剩餘股數放回持倉繼續賣
+                cost_part = o["cost"] * filled / o["shares"] if remaining else o["cost"]
+                pnl  = net - cost_part
                 with self._lock:
                     self._state["cash"]      += net
                     self._state["daily_pnl"] += pnl
                     self._log_trade(o["code"], "SELL", filled, price, o["reason"], {}, is_real=True, pnl=pnl, order_no=order_no)
+                    if remaining:
+                        self._requeue_real_holding(o, shares=remaining, cost=o["cost"] - cost_part)
+                if remaining:
+                    if self._cancel_order_fn and not o.get("cancel_sent"):
+                        self._cancel_order_fn(o["code"], order_no)
+                    logger.warning(f"[DayTrader] ⚠️ 賣單部分成交 {o['code']} {filled}/{o['shares']}股，剩餘 {remaining} 股續賣")
+                    self._alert(f"⚠️ <b>當沖賣單部分成交</b> {o['code']}  {filled}/{o['shares']}股\n"
+                                f"剩餘 {remaining} 股已重新排入賣出", key=f"sell_partial:{order_no}")
                 try:
                     from utils.platform_signal import report_position as _rpos
-                    _rpos(TRADING_USER_ID, o["code"], "LONG", 0, price, is_real=True, account="real")
+                    _rpos(TRADING_USER_ID, o["code"], "LONG", remaining, o.get("entry_price", price),
+                          is_real=True, account="real")
                 except Exception:
                     pass
                 emoji = "🟩" if pnl >= 0 else "🟥"
@@ -1387,64 +1438,40 @@ class DayTrader:
                 except Exception:
                     pass
                 sell_done.append(order_no)
-                # 重新放回 holdings，讓下一次 _check_holdings 觸發再賣
-                # 用原始買入成本價重建，避免以賣出委託價重算 SL/TP
+                # 放回 holdings 並標記 force_exit，下一輪立即再賣
                 with self._lock:
-                    if o["code"] not in self._state["holdings"]:
-                        ep = o.get("entry_price", o["price"])
-                        self._state["holdings"][o["code"]] = {
-                            "shares": o["shares"], "entry_price": ep,
-                            "entry_time": "??:??",
-                            "entry_ts":   o.get("entry_ts", time.time()),
-                            "is_real": True,  # 賣單被拒，原始為真實持倉
-                            "cost": o["cost"],
-                            "stop_loss":   round(ep * (1 + _fetch_user_config()["stop_loss_pct"]), 2),
-                            "take_profit": round(ep * (1 + _fetch_user_config()["take_profit_pct"]), 2),
-                        }
-            elif time.time() - o["placed_at"] > 60 and o.get("retries", 0) == 0:
-                # 60s 未成交：取消 + 以新價重試一次
-                if self._cancel_order_fn:
-                    self._cancel_order_fn(o["code"], order_no)
-                df = _fetch_intraday(o["code"])
-                new_price = float(df["Close"].iloc[-1]) if df is not None else o["price"]
-                new_no = self._place_order_fn(o["code"], "SELL", o["shares"], new_price) if self._place_order_fn else None
-                if new_no:
-                    o2 = dict(o, price=new_price, placed_at=time.time(), retries=1)
-                    self._pending_sell_orders[new_no] = o2
-                    logger.warning(f"[DayTrader] ⚠️ 賣單超時重試 {o['code']} @{new_price:.2f} 新單號={new_no}")
-                else:
-                    # 最後手段：紙上強制結算（確保 T+0）
-                    _pr = o["shares"] * new_price
-                    _fe = max(_MIN_FEE, round(_pr * _COMMISSION_RATE))
-                    _st = round(_pr * _STT_RATE)
-                    _net = _pr - _fe - _st
-                    pnl_est = _net - o["cost"]
+                    self._requeue_real_holding(o)
+            elif time.time() - o["placed_at"] > 60:
+                # 60 秒未成交：先送取消，下一輪確認「取消前沒有成交」才重下
+                # （若原單其實已成交還重下，會變成多賣一次＝真實放空）
+                if not o.get("cancel_sent"):
+                    if self._cancel_order_fn:
+                        self._cancel_order_fn(o["code"], order_no)
+                    o["cancel_sent"] = True
+                    logger.warning(f"[DayTrader] ⏰ 賣單超時，已送取消 {o['code']} {order_no}，下一輪確認")
+                    continue
+                # 動作前再查一次成交，降低查詢失敗被當成「未成交」的機率
+                again, _ = self._check_filled_fn(o["code"], order_no)
+                if again != 0:
+                    continue   # 已成交或被拒 → 交給下一輪的正常路徑處理
+                new_no = None
+                if o.get("retries", 0) == 0 and self._place_order_fn:
+                    df = _fetch_intraday(o["code"])
+                    new_price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else o["price"]
+                    new_no = self._place_order_fn(o["code"], "SELL", o["shares"], new_price)
+                    if new_no:
+                        self._pending_sell_orders[new_no] = dict(
+                            o, price=new_price, placed_at=time.time(), retries=1, cancel_sent=False)
+                        logger.warning(f"[DayTrader] ⚠️ 賣單超時重試 {o['code']} @{new_price:.2f} 新單號={new_no}")
+                if not new_no:
+                    # 真實股票還在庫存：不做紙上結算（會讓帳面與券商不一致），放回持倉續賣並告警
                     with self._lock:
-                        self._state["cash"]      += _net
-                        self._state["daily_pnl"] += pnl_est
-                        self._log_trade(o["code"], "SELL", o["shares"], new_price, f"{o['reason']}(強制紙上)", {}, is_real=False, pnl=pnl_est)
-                    logger.error(
-                        f"[DayTrader] ❌ {o['code']} 賣單重試失敗，紙上強制結算 @{new_price:.2f}"
-                        f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}"
-                    )
-                sell_done.append(order_no)
-            elif time.time() - o["placed_at"] > 120 and o.get("retries", 0) >= 1:
-                # 第二次也超時：先取消委託，再紙上強制結算
-                if self._cancel_order_fn:
-                    self._cancel_order_fn(o["code"], order_no)
-                df = _fetch_intraday(o["code"])
-                fp = float(df["Close"].iloc[-1]) if df is not None else o["price"]
-                _pr = o["shares"] * fp
-                _fe = max(_MIN_FEE, round(_pr * _COMMISSION_RATE))
-                _st = round(_pr * _STT_RATE)
-                _net = _pr - _fe - _st
-                pnl_est = _net - o["cost"]
-                with self._lock:
-                    self._state["cash"]      += _net
-                    self._state["daily_pnl"] += pnl_est
-                    self._log_trade(o["code"], "SELL", o["shares"], fp, f"{o['reason']}(強制紙上)", {}, is_real=False, pnl=pnl_est)
-                logger.error(f"[DayTrader] ❌ {o['code']} 賣單兩次超時，紙上強制結算 @{fp:.2f}"
-                             f"  手續費={_fe+_st:,.0f}  損益={pnl_est:+,.0f}")
+                        self._requeue_real_holding(o)
+                    logger.error(f"[DayTrader] ❌ {o['code']} 賣單未成交（已重試 {o.get('retries', 0)} 次），持倉保留續賣")
+                    self._alert(f"🚨 <b>當沖賣單未成交</b> {o['code']}  {o['shares']}股\n"
+                                f"原因={o['reason']}  已重試 {o.get('retries', 0)} 次\n"
+                                f"持倉已保留並持續嘗試賣出，請確認券商庫存，必要時手動處理",
+                                key=f"sell_stuck:{o['code']}", cooldown=120)
                 sell_done.append(order_no)
         for no in sell_done:
             del self._pending_sell_orders[no]
@@ -1547,9 +1574,18 @@ class DayTrader:
 
                     # 富邦已無庫存 → 移除假持倉（可能已被其他路徑成交）
                     if code not in fubon_qty:
-                        logger.warning(f"[DayTrader] ⚠️ 移除假持倉 {code}（富邦庫存=0）")
+                        # 成交後庫存可能延遲出現：建倉 3 分鐘內不刪，之後連續 2 次查不到才刪
+                        if time.time() - h.get("entry_ts", 0) < 180:
+                            continue
+                        h["inv_miss"] = h.get("inv_miss", 0) + 1
+                        if h["inv_miss"] < 2:
+                            continue
+                        logger.warning(f"[DayTrader] ⚠️ 移除假持倉 {code}（富邦庫存連續 2 次為 0）")
+                        self._alert(f"⚠️ <b>當沖持倉已移除</b> {code}\n富邦庫存連續 2 次查無此股，"
+                                    f"本地持倉已清除（停損停利不再監控）", key=f"inv_gone:{code}")
                         del holdings[code]
                         continue
+                    h.pop("inv_miss", None)
 
                     # 數量不符 → 以富邦為準
                     if h["shares"] != fubon_qty[code]:
@@ -1655,6 +1691,9 @@ class DayTrader:
 
             if force_close:
                 self._paper_sell(code, price, "強制平倉 13:20")
+                continue
+            if h.get("force_exit"):
+                self._paper_sell(code, price, str(h["force_exit"]))
                 continue
             if price <= h["stop_loss"]:
                 self._paper_sell(code, price, f"停損 {h['stop_loss']:.2f}")

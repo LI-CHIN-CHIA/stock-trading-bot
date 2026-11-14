@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pytz
@@ -83,7 +83,7 @@ class FadeTrader:
         self._state = self._load()
 
     def _new_state(self) -> dict:
-        return {"date": str(date.today()), "cash": FADE_CAPITAL, "holdings": {},
+        return {"date": str(datetime.now(TZ).date()), "cash": FADE_CAPITAL, "holdings": {},
                 "daily_pnl": 0.0, "scanned": False, "trade_log": []}
 
     def _load(self) -> dict:
@@ -158,7 +158,7 @@ class FadeTrader:
         now = datetime.now(TZ)
         hm = (now.hour, now.minute)
         with self._lock:
-            if self._state.get("date") != str(date.today()):
+            if self._state.get("date") != str(datetime.now(TZ).date()):
                 self._state = self._new_state()
 
         # 進場：09:05~09:30 掃描一次（資料沒抓到會在視窗內重試）

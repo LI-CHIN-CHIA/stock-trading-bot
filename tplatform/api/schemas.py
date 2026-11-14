@@ -170,7 +170,8 @@ class AccountOut(BaseModel):
     kind: str             # "real" / "paper"
     label: str
     budget: float         # 真實=單筆額度；模擬=帳戶總額度
-    used: float           # 目前持倉佔用金額
+    used: float           # 目前持倉佔用金額（收盤平倉後為 0）
+    traded_today: float = 0.0   # 今日進場成交金額合計（BUY + SHORT）
     today_pnl: float
     pnl_pct: float        # today_pnl / budget
     trade_count: int
