@@ -206,6 +206,23 @@ struct Signal: Codable, Identifiable, Equatable {
 
 // MARK: - Summary
 
+/// 單日的額度使用（/api/summary 的 days）
+struct DayUsage: Codable, Equatable {
+    let date: String
+    let traded: Double        // 當日進場成交金額合計
+    let peakUsed: Double      // 當日最高同時佔用
+    let peakUsedPct: Double   // 佔額度比例（0~1，可能超過 1）
+    let pnl: Double
+    let tradeCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case date, traded, pnl
+        case peakUsed    = "peak_used"
+        case peakUsedPct = "peak_used_pct"
+        case tradeCount  = "trade_count"
+    }
+}
+
 struct DailySummary: Codable {
     let date: String
     let totalPnl: Double
@@ -215,9 +232,21 @@ struct DailySummary: Codable {
     let targetPct: Double
     let targetPnl: Double
     let hitTarget: Bool
+    // 額度使用（舊版後端沒有這些欄位，故為 optional）
+    let budget: Double?
+    let traded: Double?
+    let avgTraded: Double?
+    let peakUsed: Double?
+    let peakUsedPct: Double?
+    let tradingDays: Int?
+    let days: [DayUsage]?
 
     enum CodingKeys: String, CodingKey {
-        case date
+        case date, budget, traded, days
+        case avgTraded   = "avg_traded"
+        case peakUsed    = "peak_used"
+        case peakUsedPct = "peak_used_pct"
+        case tradingDays = "trading_days"
         case totalPnl   = "total_pnl"
         case tradeCount = "trade_count"
         case winCount   = "win_count"

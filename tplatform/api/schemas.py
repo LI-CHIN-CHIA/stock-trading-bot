@@ -181,7 +181,22 @@ class AccountOut(BaseModel):
     hit_target: bool
 
 
+class DayUsage(BaseModel):
+    date: str
+    traded: float = 0.0          # 當日進場成交金額合計
+    peak_used: float = 0.0       # 當日最高同時佔用
+    peak_used_pct: float = 0.0   # 佔額度比例
+    pnl: float = 0.0
+    trade_count: int = 0
+
+
 class DailySummary(BaseModel):
+    traded: float = 0.0          # 區間進場成交金額合計
+    avg_traded: float = 0.0      # 每個交易日平均
+    peak_used: float = 0.0       # 區間內單日最高同時佔用
+    peak_used_pct: float = 0.0
+    trading_days: int = 0
+    days: list[DayUsage] = []
     account: str = ""
     budget: float = 0.0
     date: str

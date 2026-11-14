@@ -6,7 +6,7 @@ from sqlalchemy import select, and_
 from ..database import get_db
 from ..models import Trade, Position, UserConfig
 from ..auth import get_current_user_id
-from ..schemas import TradeIn, TradeOut, DailySummary, SystemTradeIn, AccountOut
+from ..schemas import TradeIn, TradeOut, DailySummary, DayUsage, SystemTradeIn, AccountOut
 from ..ws_hub import hub
 from .. import accounts as acct
 
@@ -50,6 +50,42 @@ async def _cfg(db: AsyncSession, user_id: int) -> UserConfig | None:
 def _stats(trades: list[Trade]) -> tuple[float, int, int]:
     closes = [t for t in trades if t.action in ("SELL", "COVER")]
     return sum(t.pnl for t in closes), len(closes), sum(1 for t in closes if t.pnl > 0)
+
+
+def _usage_by_day(trades: list[Trade]) -> list[dict]:
+    """逐日的額度使用：動用金額（當日進場成交金額合計）與最高同時佔用（任一時點未平倉成本的最大值）。
+
+    依成交時間重播；跨日未平倉的部位會帶到隔日計入佔用。查詢區間之前就持有的部位不在資料內，不計。
+    """
+    lots: dict[tuple, list[float]] = {}   # (account, code, 多/空) -> [股數, 成本]
+    days: dict[str, dict] = {}
+    cur = 0.0
+    for t in sorted(trades, key=lambda t: (t.trade_date, t.created_at, t.id)):
+        d = days.get(t.trade_date)
+        if d is None:
+            d = days[t.trade_date] = {"date": t.trade_date, "traded": 0.0, "peak_used": cur,
+                                      "pnl": 0.0, "trade_count": 0}
+        key = (t.account, t.code, "S" if t.action in ("SHORT", "COVER") else "L")
+        if t.action in ("BUY", "SHORT"):
+            v = float(t.shares) * float(t.price)
+            lot = lots.setdefault(key, [0.0, 0.0])
+            lot[0] += t.shares
+            lot[1] += v
+            cur += v
+            d["traded"] += v
+            d["peak_used"] = max(d["peak_used"], cur)
+        else:
+            d["pnl"] += float(t.pnl)
+            d["trade_count"] += 1
+            lot = lots.get(key)
+            if lot and lot[0] > 0:
+                frac = min(1.0, t.shares / lot[0])
+                cur -= lot[1] * frac
+                lot[0] -= lot[0] * frac
+                lot[1] -= lot[1] * frac
+                if lot[0] <= 1e-9:
+                    del lots[key]
+    return [days[k] for k in sorted(days, reverse=True)]
 
 
 router = APIRouter(prefix="/api", tags=["trades"])
@@ -124,8 +160,20 @@ async def daily_summary(
     budget = acct.budget_of(account, cfg)
     total_pnl, n, wins = _stats(trades)
     target_pnl = budget * _TARGET_PCT
+    usage = _usage_by_day(trades)
+    traded = sum(d["traded"] for d in usage)
+    peak = max((d["peak_used"] for d in usage), default=0.0)
+    pct = (lambda v: round(v / budget, 4) if budget else 0.0)
 
     return DailySummary(
+        traded=round(traded, 0),
+        avg_traded=round(traded / len(usage), 0) if usage else 0.0,
+        peak_used=round(peak, 0),
+        peak_used_pct=pct(peak),
+        trading_days=len(usage),
+        days=[DayUsage(date=d["date"], traded=round(d["traded"], 0), peak_used=round(d["peak_used"], 0),
+                       peak_used_pct=pct(d["peak_used"]), pnl=round(d["pnl"], 0),
+                       trade_count=d["trade_count"]) for d in usage],
         account=account,
         budget=budget,
         date=trade_date or (f"{start_date}~{end_date}" if (start_date or end_date) else _today_taipei()),

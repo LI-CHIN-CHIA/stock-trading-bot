@@ -46,6 +46,10 @@ struct TradesView: View {
         return dict.keys.sorted(by: >).map { d in (date: d, trades: dict[d]!) }
     }
 
+    private var usageByDate: [String: DayUsage] {
+        Dictionary((summary?.days ?? []).map { ($0.date, $0) }, uniquingKeysWith: { a, _ in a })
+    }
+
     var body: some View {
         NavigationView {
             // 篩選列、帳戶列與狀態訊息都放在同一個 List 裡：若橫向的 AccountPicker 是頁面中
@@ -111,7 +115,9 @@ struct TradesView: View {
                     .listRowSeparator(.hidden)
                 } else {
                     ForEach(grouped, id: \.date) { group in
-                        Section(header: DateHeader(dateStr: group.date)) {
+                        // 多日時，每個日期標題帶出當日的額度使用與損益
+                        Section(header: DateHeader(dateStr: group.date,
+                                                   usage: grouped.count > 1 ? usageByDate[group.date] : nil)) {
                             ForEach(group.trades) { trade in
                                 TradeRow(trade: trade)
                             }
@@ -172,7 +178,17 @@ private struct SummaryBanner: View {
     let summary: DailySummary
     let range: TradeRange
 
+    /// 多日區間顯示「日均動用」，單日顯示當日動用
+    private var multiDay: Bool { (summary.tradingDays ?? 1) > 1 }
+
+    private var usedText: String {
+        guard let peak = summary.peakUsed, peak > 0 else { return "-" }
+        guard let pct = summary.peakUsedPct, pct > 0 else { return formatWan(peak) }
+        return "\(formatWan(peak)) (\(String(format: "%.0f%%", pct * 100)))"
+    }
+
     var body: some View {
+      VStack(spacing: 8) {
         HStack(spacing: 0) {
             StatCell(
                 label: range == .today ? "今日損益" : (range == .custom ? "區間損益" : "\(range.label)損益"),
@@ -194,6 +210,28 @@ private struct SummaryBanner: View {
                 color: summary.winRate >= 0.5 ? .green : .orange
             )
         }
+        // ── 額度使用 ──
+        if let traded = summary.traded {
+            Divider()
+            HStack(spacing: 0) {
+                StatCell(
+                    label: multiDay ? "日均動用" : "動用金額",
+                    value: formatWan(multiDay ? (summary.avgTraded ?? 0) : traded),
+                    color: .primary
+                )
+                Divider().frame(height: 36)
+                StatCell(
+                    label: multiDay ? "單日最高佔用" : "最高同時佔用",
+                    value: usedText,
+                    color: (summary.peakUsedPct ?? 0) > 1 ? .orange : .primary
+                )
+                if let b = summary.budget, b > 0 {
+                    Divider().frame(height: 36)
+                    StatCell(label: "額度", value: formatWan(b), color: .secondary)
+                }
+            }
+        }
+      }
         .padding(.vertical, 10)
         .background(Color(.secondarySystemBackground))
         .cornerRadius(10)
@@ -218,6 +256,7 @@ private struct StatCell: View {
 
 private struct DateHeader: View {
     let dateStr: String  // "2026-11-09"
+    var usage: DayUsage? = nil
 
     var label: String {
         let formatter = DateFormatter()
@@ -232,10 +271,23 @@ private struct DateHeader: View {
     }
 
     var body: some View {
-        Text(label)
-            .font(.subheadline).bold()
-            .foregroundColor(.secondary)
-            .textCase(nil)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label).font(.subheadline).bold().foregroundColor(.secondary)
+                Spacer()
+                if let u = usage, u.tradeCount > 0 {
+                    Text("\(u.pnl >= 0 ? "+" : "")\(Int(u.pnl))")
+                        .font(.subheadline).bold()
+                        .foregroundColor(u.pnl >= 0 ? .green : .red)
+                }
+            }
+            if let u = usage {
+                Text("動用 \(formatWan(u.traded)) · 最高佔用 \(formatWan(u.peakUsed))"
+                     + (u.peakUsedPct > 0 ? " (\(String(format: "%.0f%%", u.peakUsedPct * 100)))" : ""))
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .textCase(nil)
     }
 }
 
