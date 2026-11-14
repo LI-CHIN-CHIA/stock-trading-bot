@@ -416,6 +416,8 @@ struct AccountPicker: View {
             }
             .padding(.horizontal)
         }
+        // 只允許左右滑：橫向 ScrollView 預設仍會上下彈動，斜滑時整排會跟著上下晃
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
     }
 }
 

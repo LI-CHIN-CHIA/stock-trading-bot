@@ -48,70 +48,78 @@ struct TradesView: View {
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
-                // ── Range picker ──────────────────────────────
-                Picker("期間", selection: $range) {
-                    ForEach(TradeRange.allCases) { r in
-                        Text(r.label).tag(r)
+            // 篩選列、帳戶列與狀態訊息都放在同一個 List 裡：若橫向的 AccountPicker 是頁面中
+            // 第一個捲動區，導覽列會把它當成主捲動區，上下滑它時大標題會跟著展開／收合
+            List {
+                Section {
+                    // ── Range picker ──────────────────────────────
+                    Picker("期間", selection: $range) {
+                        ForEach(TradeRange.allCases) { r in
+                            Text(r.label).tag(r)
+                        }
                     }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
-                if range == .custom {
-                    HStack(spacing: 8) {
-                        DatePicker("起", selection: $startDate, in: ...Date(), displayedComponents: .date)
-                            .labelsHidden()
-                        Text("～").foregroundColor(.secondary)
-                        DatePicker("迄", selection: $endDate, in: ...Date(), displayedComponents: .date)
-                            .labelsHidden()
-                        Spacer()
-                    }
-                    .environment(\.locale, Locale(identifier: "zh_TW"))
+                    .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
-                }
+                    .padding(.vertical, 8)
+                    .headerRow()
 
-                if accounts.count > 1 {
-                    AccountPicker(accounts: accounts).padding(.bottom, 8)
-                }
-
-                // ── Summary banner ────────────────────────────
-                if let s = summary {
-                    SummaryBanner(summary: s, range: range)
+                    if range == .custom {
+                        HStack(spacing: 8) {
+                            DatePicker("起", selection: $startDate, in: ...Date(), displayedComponents: .date)
+                                .labelsHidden()
+                            Text("～").foregroundColor(.secondary)
+                            DatePicker("迄", selection: $endDate, in: ...Date(), displayedComponents: .date)
+                                .labelsHidden()
+                            Spacer()
+                        }
+                        .environment(\.locale, Locale(identifier: "zh_TW"))
                         .padding(.horizontal, 16)
                         .padding(.bottom, 8)
+                        .headerRow()
+                    }
+
+                    if accounts.count > 1 {
+                        AccountPicker(accounts: accounts)
+                            .padding(.bottom, 8)
+                            .headerRow()
+                    }
+
+                    // ── Summary banner ────────────────────────────
+                    if let s = summary {
+                        SummaryBanner(summary: s, range: range)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+                            .headerRow()
+                    }
                 }
 
-                Divider()
-
                 // ── Trade list ────────────────────────────────
-                Group {
-                    if !errorMsg.isEmpty {
-                        ContentUnavailableView("交易紀錄載入失敗", systemImage: "exclamationmark.triangle",
-                                               description: Text(errorMsg))
-                    } else if isLoading && trades.isEmpty {
-                        ProgressView("載入中...").frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if trades.isEmpty {
-                        ContentUnavailableView(
-                            "此期間無交易記錄",
-                            systemImage: "chart.line.flattrend.xyaxis"
-                        )
-                    } else {
-                        List {
-                            ForEach(grouped, id: \.date) { group in
-                                Section(header: DateHeader(dateStr: group.date)) {
-                                    ForEach(group.trades) { trade in
-                                        TradeRow(trade: trade)
-                                    }
-                                }
+                if !errorMsg.isEmpty {
+                    ContentUnavailableView("交易紀錄載入失敗", systemImage: "exclamationmark.triangle",
+                                           description: Text(errorMsg))
+                        .listRowSeparator(.hidden)
+                } else if isLoading && trades.isEmpty {
+                    ProgressView("載入中...")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                        .listRowSeparator(.hidden)
+                } else if trades.isEmpty {
+                    ContentUnavailableView(
+                        "此期間無交易記錄",
+                        systemImage: "chart.line.flattrend.xyaxis"
+                    )
+                    .listRowSeparator(.hidden)
+                } else {
+                    ForEach(grouped, id: \.date) { group in
+                        Section(header: DateHeader(dateStr: group.date)) {
+                            ForEach(group.trades) { trade in
+                                TradeRow(trade: trade)
                             }
                         }
-                        .listStyle(.plain)
                     }
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("交易紀錄")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -148,6 +156,13 @@ struct TradesView: View {
             summary = try? await s
             isLoading = false
         }
+    }
+}
+
+private extension View {
+    /// List 頂部篩選區的列：不要預設內距與分隔線，維持原本貼齊畫面的版面
+    func headerRow() -> some View {
+        listRowInsets(EdgeInsets()).listRowSeparator(.hidden)
     }
 }
 

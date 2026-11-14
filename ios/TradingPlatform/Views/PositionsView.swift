@@ -10,23 +10,30 @@ struct PositionsView: View {
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
+            // 帳戶列與狀態訊息都放在同一個 List 裡：若橫向的 AccountPicker 是頁面最上方的
+            // 捲動區，導覽列會把它當成主捲動區，上下滑它時大標題會跟著展開／收合
+            List {
                 if accounts.count > 1 {
-                    AccountPicker(accounts: accounts).padding(.vertical, 8)
+                    AccountPicker(accounts: accounts)
+                        .padding(.vertical, 8)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
                 }
                 if !errorMsg.isEmpty {
                     // 載入失敗不能顯示成「無持倉」，否則會誤以為已經沒有部位
                     ContentUnavailableView("持倉載入失敗", systemImage: "exclamationmark.triangle",
                                            description: Text(errorMsg))
+                        .listRowSeparator(.hidden)
                 } else if positions.isEmpty && !isLoading {
                     ContentUnavailableView("目前無持倉", systemImage: "tray")
+                        .listRowSeparator(.hidden)
                 } else {
-                    List(positions) { pos in
+                    ForEach(positions) { pos in
                         PositionRow(position: pos)
                     }
-                    .listStyle(.plain)
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("持倉")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
