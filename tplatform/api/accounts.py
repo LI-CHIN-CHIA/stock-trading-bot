@@ -59,7 +59,7 @@ def budget_of(account: str, cfg: UserConfig | None) -> float:
     return cfg.day_budget if cfg else 50000.0
 
 
-_STRATEGY_LABELS = {"paper": "模擬", "fade": "過熱放空", "dip": "超跌做多"}
+_STRATEGY_LABELS = {"paper": "模擬", "fade": "過熱放空", "dip": "超跌做多", "swing": "回檔波段"}
 
 
 def label_of(account: str) -> str:

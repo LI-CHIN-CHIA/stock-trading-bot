@@ -73,7 +73,9 @@ day_bot       = DayTrader()
 from trader.fade_trader import FadeTrader
 fade_bot      = FadeTrader()
 from trader.dip_trader import DipTrader
+from trader.swing_trader import SwingTrader
 dip_bot       = DipTrader()
+swing_bot     = SwingTrader()
 overnight_bot = OvernightTrader()
 
 
@@ -123,6 +125,10 @@ def job_day_trader():
         dip_bot.run_cycle()
     except Exception as e:
         logger.error(f"超跌做多週期失敗: {e}", exc_info=True)
+    try:
+        swing_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"回檔波段週期失敗: {e}", exc_info=True)
 
 
 def job_overnight_trader():
