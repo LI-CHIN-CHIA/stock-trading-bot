@@ -215,7 +215,7 @@ private struct SummaryBanner: View {
             Divider()
             HStack(spacing: 0) {
                 StatCell(
-                    label: multiDay ? "日均動用" : "動用金額",
+                    label: multiDay ? "日均累計成交" : "累計成交（可重複）",
                     value: formatWan(multiDay ? (summary.avgTraded ?? 0) : traded),
                     color: .primary
                 )

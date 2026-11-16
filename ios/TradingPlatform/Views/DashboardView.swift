@@ -193,7 +193,7 @@ struct BudgetCard: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("持倉中 \(Int(account.used)) 元")
-                    Text("今日動用 \(Int(account.tradedToday ?? 0)) 元")
+                    Text("今日累計成交 \(Int(account.tradedToday ?? 0)) 元")
                 }
                 .font(.caption).foregroundColor(.secondary)
             }
