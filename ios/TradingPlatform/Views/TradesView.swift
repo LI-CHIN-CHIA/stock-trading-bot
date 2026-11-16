@@ -282,7 +282,7 @@ private struct DateHeader: View {
                 }
             }
             if let u = usage {
-                Text("動用 \(formatWan(u.traded)) · 最高佔用 \(formatWan(u.peakUsed))"
+                Text("累計成交 \(formatWan(u.traded)) · 最高佔用 \(formatWan(u.peakUsed))"
                      + (u.peakUsedPct > 0 ? " (\(String(format: "%.0f%%", u.peakUsedPct * 100)))" : ""))
                     .font(.caption2).foregroundColor(.secondary)
             }
