@@ -36,6 +36,7 @@ DIP_GAP_MAX    = float(os.getenv("DIP_GAP_MAX", "0.09"))      # 開盤即跌停�
 DIP_PRICE_MAX  = float(os.getenv("DIP_PRICE_MAX", "330"))
 DIP_TP_PCT     = float(os.getenv("DIP_TP_PCT", "0.03"))
 _SCAN_FROM, _SCAN_UNTIL, _CLOSE_AT = (9, 5), (9, 30), (13, 20)
+_SCAN_GIVE_UP = (9, 28)   # 到這時間報價還沒到齊，就用已取得的決定
 
 ACCOUNT = f"dip-{int(DIP_CAPITAL)}"
 
@@ -74,11 +75,11 @@ def select(rows: list[dict]) -> list[dict]:
     return sorted(out, key=lambda r: r["ret5"])
 
 
-def find_candidates() -> list[dict]:
+def prefilter() -> list[tuple[str, str, float, float]]:
+    """用日線篩出 5 日跌幅達標的股票：[(代號, symbol, 昨收, 5日報酬)]。"""
     today = datetime.now(TZ).date()
-    uni = _universe()
-    syms = {f"{c}.{s}": c for c, s in uni.items()}
-    pre = []   # 先用日線篩 5 日跌幅，再抓分 K 看今日開盤
+    syms = {f"{c}.{s}": c for c, s in _universe().items()}
+    pre = []
     names = list(syms)
     for i in range(0, len(names), 100):
         chunk = names[i:i + 100]
@@ -97,20 +98,31 @@ def find_candidates() -> list[dict]:
                 pc = float(c.iloc[-1])
                 ret5 = pc / float(c.iloc[-6]) - 1
                 if ret5 <= -DIP_RET5_MIN:
-                    pre.append((sym, pc, ret5))
+                    pre.append((syms[sym], sym, pc, ret5))
             except Exception:
                 continue
+    return pre
+
+
+def quote(pre: list[tuple[str, str, float, float]]) -> list[dict]:
+    """抓今日分 K；今日還沒有報價的股票不會出現在結果裡（呼叫端稍後重試）。"""
     rows = []
-    for sym, pc, ret5 in pre:
+    for code, sym, pc, ret5 in pre:
         try:
             q = _last_price(sym)
             if q is None:
                 continue
             day_open, price = q
-            rows.append({"code": syms[sym], "symbol": sym, "price": price, "ret5": ret5,
+            rows.append({"code": code, "symbol": sym, "price": price, "ret5": ret5,
                          "gap": day_open / pc - 1, "prev_close": pc})
         except Exception as e:
             logger.debug(f"[Dip] {sym} 資料失敗: {e}")
+    return rows
+
+
+def find_candidates() -> list[dict]:
+    pre = prefilter()
+    rows = quote(pre)
     logger.info(f"[Dip] 5日跌≥{DIP_RET5_MIN:.0%} 共 {len(pre)} 檔，取得報價 {len(rows)} 檔")
     return select(rows)
 
@@ -119,6 +131,7 @@ class DipTrader:
     def __init__(self):
         self._lock = threading.RLock()
         self._state = self._load()
+        self._pre, self._pre_date = None, None   # 當日日線初篩結果（只算一次）
 
     def _new_state(self) -> dict:
         return {"date": str(datetime.now(TZ).date()), "holdings": {}, "daily_pnl": 0.0,
@@ -196,15 +209,24 @@ class DipTrader:
             if self._state.get("date") != str(now.date()):
                 self._state = self._new_state()
 
+        # 進場掃描：yfinance 分 K 會延遲（2026-11-16 實測 09:05 時 5 檔候選一檔報價都沒有），
+        # 所以報價沒到齊就每個週期重試，到齊或到 _SCAN_GIVE_UP 才決定，以保留「跌最深優先」的排序。
         if not self._state["scanned"] and _SCAN_FROM <= hm < _SCAN_UNTIL:
-            cands = find_candidates()
-            with self._lock:
-                for c in cands:
-                    self._buy(c)
-                self._state["scanned"] = True
-                logger.info(f"[Dip] 今日符合 {len(cands)} 檔: "
-                            + ", ".join(f"{c['code']}(5日{c['ret5']*100:+.0f}% gap{c['gap']*100:+.1f}%)" for c in cands[:10]))
-                self._save()
+            if self._pre is None or self._pre_date != str(now.date()):
+                self._pre, self._pre_date = prefilter(), str(now.date())
+                logger.info(f"[Dip] 5日跌≥{DIP_RET5_MIN:.0%} 共 {len(self._pre)} 檔")
+            rows = quote(self._pre)
+            if len(rows) >= len(self._pre) or hm >= _SCAN_GIVE_UP:
+                cands = select(rows)
+                with self._lock:
+                    for c in cands:
+                        self._buy(c)
+                    self._state["scanned"] = True
+                    logger.info(f"[Dip] 取得報價 {len(rows)}/{len(self._pre)} 檔，今日符合 {len(cands)} 檔: "
+                                + ", ".join(f"{c['code']}(5日{c['ret5']*100:+.0f}% gap{c['gap']*100:+.1f}%)" for c in cands[:10]))
+                    self._save()
+            else:
+                logger.info(f"[Dip] 報價尚未到齊（{len(rows)}/{len(self._pre)}），下個週期重試")
 
         for code in list(self._state["holdings"]):
             h = self._state["holdings"][code]
