@@ -117,7 +117,8 @@ struct TradesView: View {
                     ForEach(grouped, id: \.date) { group in
                         // 多日時，每個日期標題帶出當日的額度使用與損益
                         Section(header: DateHeader(dateStr: group.date,
-                                                   usage: grouped.count > 1 ? usageByDate[group.date] : nil)) {
+                                                   usage: grouped.count > 1 ? usageByDate[group.date] : nil,
+                                                   budget: summary?.budget ?? 0)) {
                             ForEach(group.trades) { trade in
                                 TradeRow(trade: trade)
                             }
@@ -181,10 +182,16 @@ private struct SummaryBanner: View {
     /// 多日區間顯示「日均動用」，單日顯示當日動用
     private var multiDay: Bool { (summary.tradingDays ?? 1) > 1 }
 
+    /// 額度 = 一天的進場總額 → 顯示「累計成交 / 額度」的比例
     private var usedText: String {
-        guard let peak = summary.peakUsed, peak > 0 else { return "-" }
-        guard let pct = summary.peakUsedPct, pct > 0 else { return formatWan(peak) }
-        return "\(formatWan(peak)) (\(String(format: "%.0f%%", pct * 100)))"
+        let traded = multiDay ? (summary.avgTraded ?? 0) : (summary.traded ?? 0)
+        guard traded > 0 else { return "-" }
+        guard let b = summary.budget, b > 0 else { return formatWan(traded) }
+        return "\(formatWan(traded)) (\(String(format: "%.0f%%", traded / b * 100)))"
+    }
+    private var usedRatio: Double {
+        guard let b = summary.budget, b > 0 else { return 0 }
+        return (multiDay ? (summary.avgTraded ?? 0) : (summary.traded ?? 0)) / b
     }
 
     var body: some View {
@@ -215,15 +222,15 @@ private struct SummaryBanner: View {
             Divider()
             HStack(spacing: 0) {
                 StatCell(
-                    label: multiDay ? "日均累計成交" : "累計成交（可重複）",
-                    value: formatWan(multiDay ? (summary.avgTraded ?? 0) : traded),
-                    color: .primary
+                    label: multiDay ? "日均已用額度" : "今日已用額度",
+                    value: usedText,
+                    color: usedRatio > 1.0001 ? .orange : .primary
                 )
                 Divider().frame(height: 36)
                 StatCell(
                     label: multiDay ? "單日最高佔用" : "最高同時佔用",
-                    value: usedText,
-                    color: (summary.peakUsedPct ?? 0) > 1 ? .orange : .primary
+                    value: formatWan(summary.peakUsed ?? 0),
+                    color: .primary
                 )
                 if let b = summary.budget, b > 0 {
                     Divider().frame(height: 36)
@@ -257,6 +264,7 @@ private struct StatCell: View {
 private struct DateHeader: View {
     let dateStr: String  // "2026-11-09"
     var usage: DayUsage? = nil
+    var budget: Double = 0
 
     var label: String {
         let formatter = DateFormatter()
@@ -282,8 +290,9 @@ private struct DateHeader: View {
                 }
             }
             if let u = usage {
-                Text("累計成交 \(formatWan(u.traded)) · 最高佔用 \(formatWan(u.peakUsed))"
-                     + (u.peakUsedPct > 0 ? " (\(String(format: "%.0f%%", u.peakUsedPct * 100)))" : ""))
+                Text("已用額度 \(formatWan(u.traded))"
+                     + ((budget > 0 ? " (\(String(format: "%.0f%%", u.traded / budget * 100)))" : "")
+                     + " · 最高佔用 \(formatWan(u.peakUsed))")
                     .font(.caption2).foregroundColor(.secondary)
             }
         }

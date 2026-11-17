@@ -27,7 +27,7 @@ struct SettingsView: View {
                     }
 
                     Section(header: Text("模擬交易額度"),
-                            footer: Text("每個額度是一個獨立的模擬帳戶，單筆約用額度的三分之一；第一個為主要模擬帳戶。變更於下一個交易日生效，最多 6 個。")) {
+                            footer: Text("每個額度是一個獨立的模擬帳戶，額度 = 一天買進＋放空的總金額（平倉不回補），單筆約用三分之一；第一個為主要模擬帳戶。變更於下一個交易日生效，最多 6 個。")) {
                         ForEach(paperBudgets, id: \.self) { b in
                             HStack {
                                 Image(systemName: "doc.text").foregroundColor(.blue)
