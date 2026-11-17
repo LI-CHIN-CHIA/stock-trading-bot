@@ -470,7 +470,12 @@ def _paper_budgets() -> list[int]:
 
 
 def _new_shadow(cap: int) -> dict:
-    return {"initial": int(cap), "cash": float(cap), "pnl": 0.0, "holdings": {}}
+    return {"initial": int(cap), "cash": float(cap), "pnl": 0.0, "holdings": {}, "traded": 0.0}
+
+
+def _day_room(acc: dict) -> float:
+    """模擬帳戶今日還能進場的金額：額度 = 一天的進場總額（買進＋放空，平倉後不回補）。"""
+    return max(0.0, acc["initial"] - acc.get("traded", 0.0))
 
 
 def _new_shadows() -> dict:
@@ -676,6 +681,7 @@ class DayTrader:
             "watch_log":      {},
             "shadows":        _new_shadows(),
             "short_cooldown": {},   # {code: last_cover_ts}
+            "traded":         0.0,  # 今日累計進場金額（模擬額度 = 一天進場總額）
         }
 
     def _account(self, is_real: bool = False) -> str:
@@ -687,7 +693,7 @@ class DayTrader:
         """單筆預算：模擬 = 帳戶額度 × 比例；真實下單另受 DAY_MAX_BUDGET 限制。"""
         initial = self._state.get("initial", DAY_INITIAL_CAPITAL)
         budget = min(initial * DAY_PER_TRADE_PCT, self._state["cash"])
-        return min(budget, DAY_MAX_BUDGET) if for_real else budget
+        return min(budget, DAY_MAX_BUDGET) if for_real else min(budget, _day_room(self._state))
 
     def _sync_shadows(self):
         """依 App 設定增減影子帳戶（需在 _lock 內呼叫）。有持倉的帳戶等平倉後才移除。"""
@@ -829,6 +835,7 @@ class DayTrader:
         _sl  = _cfg["stop_loss_pct"]
         _tp  = _cfg["take_profit_pct"]
         self._state["cash"] -= total_cost
+        self._state["traded"] = self._state.get("traded", 0.0) + cost
         holdings[code] = {
             "shares":         shares,
             "entry_price":    price,
@@ -883,6 +890,7 @@ class DayTrader:
             sell_value = shares * price
             sell_fee   = max(_MIN_FEE, round(sell_value * _COMMISSION_RATE))
             stt        = round(sell_value * _STT_RATE)
+            self._state["traded"] = self._state.get("traded", 0.0) + sell_value
 
             holdings[short_key] = {
                 "code":         code,
@@ -956,7 +964,7 @@ class DayTrader:
             sh = acc["holdings"]
             if code in sh or len(sh) >= DAY_MAX_POSITIONS:
                 continue
-            budget = min(acc["initial"] * DAY_PER_TRADE_PCT, acc["cash"])
+            budget = min(acc["initial"] * DAY_PER_TRADE_PCT, acc["cash"], _day_room(acc))
             shares = int(budget // (price * 1000)) * 1000
             if shares <= 0:
                 continue
@@ -966,6 +974,7 @@ class DayTrader:
             if total > acc["cash"]:
                 continue
             acc["cash"] -= total
+            acc["traded"] = acc.get("traded", 0.0) + cost
             sh[code] = {
                 "shares":      shares,
                 "entry_price": price,
@@ -989,13 +998,14 @@ class DayTrader:
             short_key = f"SHORT_{code}"
             if short_key in sh or len(sh) >= DAY_MAX_POSITIONS:
                 continue
-            budget   = min(acc["initial"] * DAY_PER_TRADE_PCT, acc["cash"])
+            budget   = min(acc["initial"] * DAY_PER_TRADE_PCT, acc["cash"], _day_room(acc))
             shares   = int(budget // (price * 1000)) * 1000
             if shares <= 0:
                 continue
             sell_val = shares * price
             sell_fee = max(_MIN_FEE, round(sell_val * _COMMISSION_RATE))
             stt      = round(sell_val * _STT_RATE)
+            acc["traded"] = acc.get("traded", 0.0) + sell_val
             sh[short_key] = {
                 "code":        code,
                 "direction":   "short",

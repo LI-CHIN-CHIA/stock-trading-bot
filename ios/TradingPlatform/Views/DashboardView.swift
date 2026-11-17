@@ -171,7 +171,9 @@ struct BudgetCard: View {
 
     // 真實帳戶的 budget 是單筆額度，總額度 = 單筆 × 最大持倉
     private var total: Double { account.isReal ? account.budget * Double(maxPositions) : account.budget }
-    private var ratio: Double { total > 0 ? min(account.used / total, 1) : 0 }
+    // 模擬帳戶：額度 = 一天的進場總額，進度條顯示今日已用；真實帳戶仍顯示持倉佔用
+    private var usedForBar: Double { account.isReal ? account.used : (account.tradedToday ?? 0) }
+    private var ratio: Double { total > 0 ? min(usedForBar / total, 1) : 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -193,7 +195,7 @@ struct BudgetCard: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("持倉中 \(Int(account.used)) 元")
-                    Text("今日累計成交 \(Int(account.tradedToday ?? 0)) 元")
+                    Text("今日已用 \(Int(account.tradedToday ?? 0)) / \(Int(total)) 元")
                 }
                 .font(.caption).foregroundColor(.secondary)
             }
