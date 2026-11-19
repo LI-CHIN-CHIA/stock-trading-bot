@@ -60,11 +60,18 @@ def _last_price(sym: str) -> tuple[float, float] | None:
     df = yf.Ticker(sym).history(period="1d", interval="1m")
     if df is None or df.empty:
         return None
-    df = df[df["Volume"] > 0].dropna(subset=["Close"])
+    df = df.dropna(subset=["Open", "Close"])
     df = df[[x.date() == today for x in df.index.tz_convert(TZ)]]
     if df.empty:
         return None
-    return float(df["Open"].iloc[0]), float(df["Close"].iloc[-1])
+    # 開盤價必須取 09:00 那根：Yahoo 的 09:00 K 棒成交量是 0（集合競價量沒回報），
+    # 以前先濾掉 Volume==0 會拿 09:01 的價格當開盤，跳空被算大 1~2%（2026-11-19 三筆假訊號）。
+    first = df.index[0].tz_convert(TZ)
+    if (first.hour, first.minute) != (9, 0):
+        return None          # 09:00 那根還沒出來 → 視為報價未到，稍後重試
+    traded = df[df["Volume"] > 0]
+    last = float(traded["Close"].iloc[-1]) if not traded.empty else float(df["Close"].iloc[-1])
+    return float(df["Open"].iloc[0]), last
 
 
 def select(rows: list[dict]) -> list[dict]:
