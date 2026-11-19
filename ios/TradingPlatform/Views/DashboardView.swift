@@ -5,6 +5,7 @@ struct DashboardView: View {
     @EnvironmentObject var ws: WSService
     @State private var summary: DailySummary?
     @State private var config: TradingConfig?
+    @State private var botStatus: BotStatus?
     @State private var accounts: [TradingAccount] = []
     @State private var isLoading = false
     @State private var errorMsg  = ""
@@ -58,7 +59,7 @@ struct DashboardView: View {
 
                     // Config quick toggles
                     if let cfg = config {
-                        ConfigCard(config: cfg, onUpdate: updateConfig)
+                        ConfigCard(config: cfg, status: botStatus, onUpdate: updateConfig)
                     }
 
                     // Latest signal
@@ -108,6 +109,7 @@ struct DashboardView: View {
                 summary = try await s
                 config  = try await c
                 errorMsg = ""
+                botStatus = try? await api.fetchBotStatus()
             } catch {
                 errorMsg = error.localizedDescription
             }
@@ -260,6 +262,7 @@ struct StatTile: View {
 
 struct ConfigCard: View {
     let config: TradingConfig
+    var status: BotStatus? = nil
     let onUpdate: (ConfigUpdate) -> Void
     @State private var confirmAutoTrade = false
 
@@ -267,6 +270,8 @@ struct ConfigCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("交易設定").font(.headline).padding(.bottom, 2)
 
+            // 真實（富邦）
+            Text("真實交易").font(.caption).foregroundColor(.orange)
             HStack {
                 // 自動下單會送出真實委託，開啟前先確認，避免捲動時誤觸；關閉則立即生效
                 ToggleRow(label: "自動下單", value: config.autoTrade) { v in
@@ -275,9 +280,28 @@ struct ConfigCard: View {
                 .confirmationDialog("開啟自動下單？", isPresented: $confirmAutoTrade, titleVisibility: .visible) {
                     Button("開啟自動下單", role: .destructive) { onUpdate(ConfigUpdate(autoTrade: true)) }
                 } message: {
-                    Text("開啟後機器人會依信號自動送出真實委託。")
+                    Text("開啟後機器人會依信號，用富邦即時價自動送出真實委託。")
                 }
                 Spacer()
+                ToggleRow(label: "當沖", value: config.realEnableDay) { v in
+                    onUpdate(ConfigUpdate(realEnableDay: v))
+                }
+                Spacer()
+                ToggleRow(label: "反沖", value: config.realEnableShort) { v in
+                    onUpdate(ConfigUpdate(realEnableShort: v))
+                }
+            }
+            if let st = status {
+                HStack(spacing: 6) {
+                    Image(systemName: st.canTradeReal ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(st.canTradeReal ? .green : .orange)
+                    Text(st.summary).font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            // 模擬（只做紙上）
+            Text("模擬交易").font(.caption).foregroundColor(.blue)
+            HStack {
                 ToggleRow(label: "當沖", value: config.enableDay) { v in
                     onUpdate(ConfigUpdate(enableDay: v))
                 }
@@ -285,6 +309,7 @@ struct ConfigCard: View {
                 ToggleRow(label: "反沖", value: config.enableShort) { v in
                     onUpdate(ConfigUpdate(enableShort: v))
                 }
+                Spacer()
             }
 
             HStack {

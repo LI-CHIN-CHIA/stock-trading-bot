@@ -22,6 +22,24 @@ async def get_config(
     return cfg
 
 
+@router.get("/bot-status")
+async def get_bot_status(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """伺服器端實際的真實交易狀態（由 bot 每 5 分鐘回報）。"""
+    import json
+    from sqlalchemy import text
+    row = (await db.execute(
+        text("SELECT data, updated_at FROM platform_bot_status WHERE user_id = :u"), {"u": user_id})).first()
+    if not row:
+        return {"available": False}
+    data = json.loads(row[0])
+    data["available"] = True
+    data["reported_at"] = row[1].isoformat()
+    return data
+
+
 @router.put("/config", response_model=ConfigResponse)
 async def update_config(
     body: ConfigUpdate,

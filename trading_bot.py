@@ -69,7 +69,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^yfinanc
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^pandas")
 
 bot           = TradingBot()
-day_bot       = DayTrader()
+day_bot       = DayTrader()            # 模擬帳戶（永遠只做紙上交易）
+real_day_bot  = DayTrader(real=True)   # 真實帳戶（只送富邦委託；開關與額度由 App 設定）
 from trader.fade_trader import FadeTrader
 fade_bot      = FadeTrader()
 from trader.dip_trader import DipTrader
@@ -115,6 +116,20 @@ def job_day_trader():
         try:
             from utils.telegram_notify import send
             send(f"🚨 <b>當沖週期例外</b>\n{type(e).__name__}: {str(e)[:200]}", key="day_cycle_exc", cooldown=600)
+        except Exception:
+            pass
+    try:
+        from utils.bot_status import report_status
+        report_status(bot, real_day_bot, min_interval=300)
+    except Exception:
+        pass
+    try:
+        real_day_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"當沖真實帳戶週期失敗: {e}", exc_info=True)
+        try:
+            from utils.telegram_notify import send
+            send(f"🚨 <b>當沖真實帳戶例外</b>\n{type(e).__name__}: {str(e)[:200]}", key="real_cycle_exc", cooldown=600)
         except Exception:
             pass
     try:
@@ -501,24 +516,32 @@ def main():
     else:
         logger.warning("尚無訓練好的模型，建議先執行 run_backtest.py")
 
-    # 實盤模式：啟動時立即登入，不等 09:10 排程
-    if not paper:
-        if bot.login():
-            logger.info("✅ 富邦實盤登入成功（啟動時）")
-            # 注入 SDK 給 DayTrader，讓當沖可選擇真實下單
-            day_bot.set_real_trading(
-                place_order_fn    = bot._place_order,
-                check_filled_fn   = bot._check_filled,
-                cancel_order_fn   = lambda code, order_no: bot._cancel_order(order_no, code),
-                inventories_fn    = lambda: bot._call_with_relogin(
-                    lambda: bot.sdk.accounting.inventories(bot.account)),
-                unrealized_fn     = lambda: bot._call_with_relogin(
-                    lambda: bot.sdk.accounting.unrealized_gains_and_loses(bot.account)),
-                daytrade_info_fn  = lambda code: bot._call_with_relogin(
-                    lambda: bot.sdk.stock.daytrade_and_stock_info(bot.account, code)),
-            )
+    # 當沖真實帳戶：DAY_REAL_TRADING=true 就登入富邦（不需要 PAPER_TRADING=false，
+    # 日線 AI 機器人仍維持紙上）。實際是否下單由 App 的自動下單 / 真實當沖開關決定。
+    from trader.day_trader import DAY_REAL_TRADING
+    real_model = getattr(day_bot, "_model", None)
+    if real_model is not None:
+        real_day_bot._model = real_model           # 共用同一個當沖模型，避免重複載入
+    if DAY_REAL_TRADING or not paper:
+        if bot.login(for_day_trading=DAY_REAL_TRADING):
+            logger.info("✅ 富邦登入成功（啟動時）")
+            if DAY_REAL_TRADING:
+                real_day_bot.set_real_trading(
+                    place_order_fn    = bot._place_order,
+                    check_filled_fn   = bot._check_filled,
+                    cancel_order_fn   = lambda code, order_no: bot._cancel_order(order_no, code),
+                    inventories_fn    = lambda: bot._call_with_relogin(
+                        lambda: bot.sdk.accounting.inventories(bot.account)),
+                    unrealized_fn     = lambda: bot._call_with_relogin(
+                        lambda: bot.sdk.accounting.unrealized_gains_and_loses(bot.account)),
+                    daytrade_info_fn  = lambda code: bot._call_with_relogin(
+                        lambda: bot.sdk.stock.daytrade_and_stock_info(bot.account, code)),
+                    quote_fn          = bot.live_quote,
+                )
         else:
-            logger.error("❌ 富邦實盤登入失敗，監控仍會執行但委託需等 09:10 重新登入")
+            logger.error("❌ 富邦登入失敗，真實當沖不會下單")
+    from utils.bot_status import report_status
+    report_status(bot, real_day_bot)
 
     scheduler = BlockingScheduler(timezone=TZ)
 

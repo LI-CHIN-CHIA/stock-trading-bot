@@ -19,10 +19,12 @@ struct TokenResponse: Codable {
 // MARK: - Config
 
 struct TradingConfig: Codable, Equatable {
-    var enableDay: Bool
-    var enableShort: Bool
+    var enableDay: Bool          // 模擬：當沖（做多）
+    var enableShort: Bool        // 模擬：反沖（做空）
     var enableOvernight: Bool
-    var autoTrade: Bool
+    var autoTrade: Bool          // 真實交易總開關（自動下單）
+    var realEnableDay: Bool      // 真實：當沖（做多）
+    var realEnableShort: Bool    // 真實：反沖（做空）
     var dayBudget: Double
     var maxPositions: Int
     var stopLossPct: Double
@@ -35,6 +37,8 @@ struct TradingConfig: Codable, Equatable {
         case enableShort     = "enable_short"
         case enableOvernight = "enable_overnight"
         case autoTrade       = "auto_trade"
+        case realEnableDay   = "real_enable_day"
+        case realEnableShort = "real_enable_short"
         case dayBudget       = "day_budget"
         case maxPositions    = "max_positions"
         case stopLossPct     = "stop_loss_pct"
@@ -49,6 +53,8 @@ struct ConfigUpdate: Codable {
     var enableShort: Bool?
     var enableOvernight: Bool?
     var autoTrade: Bool?
+    var realEnableDay: Bool?
+    var realEnableShort: Bool?
     var dayBudget: Double?
     var maxPositions: Int?
     var stopLossPct: Double?
@@ -60,11 +66,50 @@ struct ConfigUpdate: Codable {
         case enableShort     = "enable_short"
         case enableOvernight = "enable_overnight"
         case autoTrade       = "auto_trade"
+        case realEnableDay   = "real_enable_day"
+        case realEnableShort = "real_enable_short"
         case dayBudget       = "day_budget"
         case maxPositions    = "max_positions"
         case stopLossPct     = "stop_loss_pct"
         case takeProfitPct   = "take_profit_pct"
         case paperBudgets    = "paper_budgets"
+    }
+}
+
+// MARK: - 伺服器端真實交易狀態（bot 每 5 分鐘回報）
+
+struct BotStatus: Codable, Equatable {
+    var available: Bool
+    var realTradingEnabled: Bool?
+    var fubonLoggedIn: Bool?
+    var liveQuoteOk: Bool?
+    var realOrderConnected: Bool?
+    var realShortSupported: Bool?
+    var reportedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case available
+        case realTradingEnabled = "real_trading_enabled"
+        case fubonLoggedIn      = "fubon_logged_in"
+        case liveQuoteOk        = "live_quote_ok"
+        case realOrderConnected = "real_order_connected"
+        case realShortSupported = "real_short_supported"
+        case reportedAt         = "reported_at"
+    }
+
+    /// 伺服器能不能真的送出真實委託
+    var canTradeReal: Bool {
+        available && (realTradingEnabled ?? false) && (fubonLoggedIn ?? false) && (realOrderConnected ?? false)
+    }
+
+    /// 給使用者看的一句話
+    var summary: String {
+        guard available else { return "伺服器尚未回報狀態" }
+        if !(realTradingEnabled ?? false) { return "伺服器未開啟真實交易" }
+        if !(fubonLoggedIn ?? false) { return "富邦未登入，無法下單" }
+        if !(realOrderConnected ?? false) { return "真實下單未接上" }
+        if liveQuoteOk == false { return "富邦即時報價異常，暫不下單" }
+        return "可真實下單（富邦即時報價）"
     }
 }
 

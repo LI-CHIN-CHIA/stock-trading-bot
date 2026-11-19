@@ -27,6 +27,8 @@ class ConfigResponse(BaseModel):
     enable_short: bool
     enable_overnight: bool
     auto_trade: bool
+    real_enable_day: bool = False
+    real_enable_short: bool = False
     day_budget: float
     max_positions: int
     stop_loss_pct: float
@@ -48,6 +50,8 @@ class ConfigUpdate(BaseModel):
     enable_short: bool | None = None
     enable_overnight: bool | None = None
     auto_trade: bool | None = None
+    real_enable_day: bool | None = None
+    real_enable_short: bool | None = None
     day_budget: float | None = None
     max_positions: int | None = None
     stop_loss_pct: float | None = None

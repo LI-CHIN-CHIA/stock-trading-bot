@@ -226,9 +226,17 @@ class TradingBot:
 
     # ── SDK Login ─────────────────────────────────────────────────────────────
 
-    def login(self) -> bool:
-        """Login to Fubon SDK and register real-time fill callbacks."""
-        if self.paper_trading:
+    def login(self, for_day_trading: bool = False) -> bool:
+        """Login to Fubon SDK and register real-time fill callbacks.
+
+        for_day_trading=True：只為當沖真實帳戶登入（PAPER_TRADING 仍可為 true）。
+        這時不註冊成交回調——回調會把成交寫進本機器人（日線 AI）的持倉，
+        當沖委託改由 DayTrader 自己輪詢 _check_filled 確認。
+        """
+        if for_day_trading:
+            self._day_login = True
+        day_only = getattr(self, "_day_login", False) and self.paper_trading
+        if self.paper_trading and not day_only:
             logger.info("📄 紙上交易模式：跳過 SDK 登入，使用模擬帳戶")
             return True
         try:
@@ -242,11 +250,17 @@ class TradingBot:
             )
             if result.is_success:
                 self.account = result.data[0]
-                logger.info(f"✅ 富邦登入成功: {self.account}")
-                # 註冊即時成交回調，成交瞬間更新持倉
-                self.sdk.set_on_filled(self._on_filled)
-                self.sdk.set_on_order(self._on_order)
-                logger.info("✅ 即時成交回調已註冊")
+                logger.info("✅ 富邦登入成功" + ("（僅供當沖真實帳戶）" if day_only else ""))
+                try:
+                    self.sdk.init_realtime()      # 即時行情（真實下單前查現價）
+                    logger.info("✅ 富邦即時行情已啟用")
+                except Exception as e:
+                    logger.error(f"❌ 富邦即時行情啟用失敗: {e}")
+                if not day_only:
+                    # 註冊即時成交回調，成交瞬間更新持倉
+                    self.sdk.set_on_filled(self._on_filled)
+                    self.sdk.set_on_order(self._on_order)
+                    logger.info("✅ 即時成交回調已註冊")
                 return True
             else:
                 logger.error(f"❌ 富邦登入失敗: {result.message}")
@@ -266,7 +280,7 @@ class TradingBot:
         result = call()
         if not result.is_success and "Not Login" in (result.message or ""):
             logger.warning("⚠️ Fubon session 過期，自動重新登入...")
-            if self._login():
+            if self.login():
                 result = call()
             else:
                 logger.error("❌ 重新登入失敗")
@@ -1176,12 +1190,25 @@ class TradingBot:
         now = datetime.now(_TZ).time()
         return dtime(9, 0) <= now <= dtime(13, 30) or dtime(13, 40) <= now <= dtime(14, 30)
 
+    def live_quote(self, code: str):
+        """富邦即時報價（dict：lastPrice/closePrice/bids/asks…）；未登入或失敗回傳 None。"""
+        if self.sdk is None:
+            return None
+        try:
+            return self.sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
+        except Exception as e:
+            logger.warning(f"富邦即時報價失敗 {code}: {e}")
+            return None
+
     def _place_order(self, code: str, side: str, shares: int, price: float, reason: str = "", proba: float = 0.0) -> str | None:
         """
         Place a buy or sell order. Returns order_no if submitted, else None.
         側: "BUY" or "SELL"
         非市場時間（09:00~13:30 盤中、13:40~14:30 盤後）不下單。
         """
+        if self.sdk is None or self.account is None:
+            logger.error(f"⛔ 富邦未登入，不下單: {side} {code}")
+            return None
         if not self._is_market_open():
             now_str = datetime.now(_TZ).strftime("%H:%M")
             logger.warning(f"⛔ 非市場時間 ({now_str})，不下單: {side} {code}")

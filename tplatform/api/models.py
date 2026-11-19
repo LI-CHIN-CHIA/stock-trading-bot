@@ -32,7 +32,9 @@ class UserConfig(Base):
     enable_day:      Mapped[bool]  = mapped_column(Boolean, default=True)
     enable_short:    Mapped[bool]  = mapped_column(Boolean, default=True)
     enable_overnight:Mapped[bool]  = mapped_column(Boolean, default=False)
-    auto_trade:      Mapped[bool]  = mapped_column(Boolean, default=False)
+    auto_trade:      Mapped[bool]  = mapped_column(Boolean, default=False)   # 真實交易總開關
+    real_enable_day:   Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # 真實當沖（做多）
+    real_enable_short: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # 真實反沖（做空）
     day_budget:      Mapped[float] = mapped_column(Float, default=50000.0)
     max_positions:   Mapped[int]   = mapped_column(Integer, default=3)
     stop_loss_pct:   Mapped[float] = mapped_column(Float, default=-0.015)

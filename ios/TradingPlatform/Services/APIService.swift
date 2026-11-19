@@ -60,6 +60,10 @@ final class APIService: ObservableObject {
         try await put("/api/config", body: update)
     }
 
+    func fetchBotStatus() async throws -> BotStatus {
+        try await get("/api/bot-status")
+    }
+
     // MARK: - Trades
 
     /// 目前在 App 選取的帳戶（"real" / "paper-<額度>"）；空字串 = 由伺服器自動決定

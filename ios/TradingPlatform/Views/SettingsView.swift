@@ -6,6 +6,8 @@ struct SettingsView: View {
     @State private var isLoading = false
     @State private var errorMsg  = ""
     @State private var showLogoutConfirm = false
+    @State private var confirmAutoTrade = false
+    @State private var status: BotStatus?
 
     // Editable state
     @State private var budget: Double = 50000
@@ -19,8 +21,57 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 if let cfg = config {
-                    Section("自動交易") {
-                        Toggle("自動下單", isOn: bindBool(\.autoTrade))
+                    // ── 真實交易（富邦）──────────────────────────────────────
+                    Section(header: Text("真實交易（富邦）"),
+                            footer: Text("一天總額度 = 單筆額度 × 最大持倉數，用完當天不再進場。委託以送單當下的富邦即時價下單；訊號價與即時價差超過 1.5% 視為訊號過時，不下單。")) {
+                        HStack {
+                            Image(systemName: (status?.canTradeReal ?? false) ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor((status?.canTradeReal ?? false) ? .green : .orange)
+                            Text(status?.summary ?? "讀取伺服器狀態中…").font(.subheadline)
+                        }
+                        Toggle("自動下單（真實）", isOn: Binding(
+                            get: { cfg.autoTrade },
+                            set: { v in
+                                if v { confirmAutoTrade = true }
+                                else { config?.autoTrade = false; update(ConfigUpdate(autoTrade: false)) }
+                            }))
+                        Toggle("當沖（做多）", isOn: bindBool(\.realEnableDay))
+                        Toggle("反沖（做空）", isOn: bindBool(\.realEnableShort))
+                            .disabled(!(status?.realShortSupported ?? false))
+                        if !(status?.realShortSupported ?? false) {
+                            Text("真實反沖（先賣後買）伺服器尚未支援，開啟也不會下單")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        HStack {
+                            Text("單筆額度")
+                            Spacer()
+                            Text("\(Int(budget / 10000)) 萬元")
+                                .foregroundColor(.secondary)
+                        }
+                        // 放開滑桿才送出：拖動中每一格都送會產生大量請求，且完成順序不保證，
+                        // 伺服器可能存到中間值
+                        Slider(value: $budget, in: 10000...500000, step: 10000) { editing in
+                            if !editing { update(ConfigUpdate(dayBudget: budget)) }
+                        }
+                        HStack {
+                            Text("最大持倉數")
+                            Spacer()
+                            Text("\(Int(maxPos)) 檔")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $maxPos, in: 1...10, step: 1) { editing in
+                            if !editing { update(ConfigUpdate(maxPositions: Int(maxPos))) }
+                        }
+                        HStack {
+                            Text("一天總額度")
+                            Spacer()
+                            Text(formatWan(budget * maxPos)).foregroundColor(.secondary)
+                        }
+                    }
+
+                    // ── 模擬交易（永遠只做紙上，不會送出委託）────────────────────
+                    Section(header: Text("模擬交易"),
+                            footer: Text("模擬帳戶只做紙上交易，跟真實交易的開關互不影響。")) {
                         Toggle("當沖（做多）", isOn: bindBool(\.enableDay))
                         Toggle("反沖（做空）", isOn: bindBool(\.enableShort))
                         Toggle("隔日沖", isOn: bindBool(\.enableOvernight))
@@ -55,31 +106,6 @@ struct SettingsView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
-                        }
-                    }
-
-                    Section(header: Text("真實交易額度"),
-                            footer: Text("真實下單每筆的金額上限；總額度 = 單筆額度 × 最大持倉數。")) {
-                        HStack {
-                            Text("單筆額度")
-                            Spacer()
-                            Text("\(Int(budget / 10000)) 萬元")
-                                .foregroundColor(.secondary)
-                        }
-                        // 放開滑桿才送出：拖動中每一格都送會產生大量請求，且完成順序不保證，
-                        // 伺服器可能存到中間值
-                        Slider(value: $budget, in: 10000...500000, step: 10000) { editing in
-                            if !editing { update(ConfigUpdate(dayBudget: budget)) }
-                        }
-
-                        HStack {
-                            Text("最大持倉數")
-                            Spacer()
-                            Text("\(Int(maxPos)) 檔")
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(value: $maxPos, in: 1...10, step: 1) { editing in
-                            if !editing { update(ConfigUpdate(maxPositions: Int(maxPos))) }
                         }
                     }
 
@@ -127,6 +153,14 @@ struct SettingsView: View {
             }
             .navigationTitle("設定")
             .onAppear { load() }
+            .confirmationDialog("開啟真實自動下單？", isPresented: $confirmAutoTrade, titleVisibility: .visible) {
+                Button("開啟", role: .destructive) {
+                    config?.autoTrade = true
+                    update(ConfigUpdate(autoTrade: true))
+                }
+            } message: {
+                Text("開啟後，真實帳戶會依訊號用富邦即時價自動送出真實委託（只在「當沖（做多）」也開啟時）。")
+            }
             .confirmationDialog("確認登出？", isPresented: $showLogoutConfirm) {
                 Button("登出", role: .destructive) {
                     WSService.shared.disconnect()
@@ -144,6 +178,7 @@ struct SettingsView: View {
             } catch {
                 errorMsg = error.localizedDescription
             }
+            status = try? await api.fetchBotStatus()
             isLoading = false
         }
     }
@@ -166,6 +201,8 @@ struct SettingsView: View {
                 var u = ConfigUpdate()
                 switch kp {
                 case \TradingConfig.autoTrade:       u.autoTrade = v
+                case \TradingConfig.realEnableDay:   u.realEnableDay = v
+                case \TradingConfig.realEnableShort: u.realEnableShort = v
                 case \TradingConfig.enableDay:       u.enableDay = v
                 case \TradingConfig.enableShort:     u.enableShort = v
                 case \TradingConfig.enableOvernight: u.enableOvernight = v

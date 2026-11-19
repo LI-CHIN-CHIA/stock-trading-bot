@@ -70,7 +70,6 @@ _MIN_FEE         = 20         # 最低手續費 20 元
 # 真實下單旗標
 DAY_REAL_TRADING  = os.getenv("DAY_REAL_TRADING", "false").lower() == "true"
 TRADING_USER_ID   = int(os.getenv("TRADING_USER_ID", "0"))   # 0 = 停用 DB 設定查詢
-DAY_MAX_BUDGET    = float(os.getenv("DAY_MAX_BUDGET",    "50000"))   # 單筆最高金額 NTD（真實）
 DAY_SHADOW_BUDGET = float(os.getenv("DAY_SHADOW_BUDGET", "160000"))  # 影子帳戶單筆預算（已棄用，保留相容）
 _SHADOW_CAPS_STR  = os.getenv("DAY_SHADOW_CAPITALS", "500000,1000000,1500000,2000000,2500000,3000000,3500000,4000000,4500000,5000000")
 SHADOW_CAPITALS: list[int] = [int(x.strip()) for x in _SHADOW_CAPS_STR.split(",") if x.strip().isdigit()]
@@ -103,9 +102,27 @@ def _symbol(code: str) -> str:
     return f"{code}.TWO" if code in OTC_SYMBOLS else f"{code}.TW"
 
 
-def _state_path() -> Path:
+def _state_path(real: bool = False) -> Path:
     data_dir = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent))
-    return data_dir / "day_trader_state.json"
+    return data_dir / ("day_trader_real_state.json" if real else "day_trader_state.json")
+
+
+# 真實下單：委託前用富邦即時報價；與訊號價（yfinance，可能延遲）差太多就放棄這次訊號
+DAY_REAL_MAX_DEVIATION = float(os.getenv("DAY_REAL_MAX_DEVIATION", "0.015"))
+
+
+def _quote_prices(q) -> dict:
+    """富邦/Fugle intraday quote（dict）→ {last, bid, ask}；缺的欄位為 None。"""
+    def g(o, k):
+        return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
+    if q is None:
+        return {"last": None, "bid": None, "ask": None}
+    last = g(q, "lastPrice") or g(q, "closePrice")
+    bids, asks = g(q, "bids") or [], g(q, "asks") or []
+    bid = g(bids[0], "price") if bids else None
+    ask = g(asks[0], "price") if asks else None
+    f = lambda v: float(v) if v not in (None, "", 0) else None
+    return {"last": f(last), "bid": f(bid), "ask": f(ask)}
 
 
 # ── 技術計算 ──────────────────────────────────────────────────────────────────
@@ -253,17 +270,30 @@ def _analyze_bars(df: pd.DataFrame) -> dict:
     }
 
 
+_intraday_cache: dict = {}            # code -> (ts, df)；模擬與真實兩個 DayTrader 共用
+_intraday_lock = threading.Lock()
+_INTRADAY_TTL  = 30                   # 秒
+
+
 def _fetch_intraday(code: str) -> pd.DataFrame | None:
-    """取得當日 2 分鐘 K 線資料。"""
+    """取得當日 1 分鐘 K 線資料（30 秒快取，避免兩個帳戶重複抓同一檔）。"""
+    now = time.time()
+    with _intraday_lock:
+        hit = _intraday_cache.get(code)
+    if hit and now - hit[0] < _INTRADAY_TTL:
+        return None if hit[1] is None else hit[1].copy()
     try:
         symbol = _symbol(code)
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=_PERIOD, interval=_INTERVAL)
         if df.empty:
-            return None
-        df = df.dropna(subset=["Close"])
-        df = df[df["Volume"] > 0]
-        return df
+            df = None
+        else:
+            df = df.dropna(subset=["Close"])
+            df = df[df["Volume"] > 0]
+        with _intraday_lock:
+            _intraday_cache[code] = (now, df)
+        return None if df is None else df.copy()
     except Exception as e:
         logger.debug(f"[DayTrader] {code} 資料擷取失敗: {e}")
         return None
@@ -274,6 +304,8 @@ _user_config_cache: dict = {
     "auto_trade":     True,
     "enable_day":     True,    # App「當沖（做多）」開關
     "enable_short":   True,    # App「反沖（做空）」開關
+    "real_enable_day":   False,   # App 真實帳戶「當沖（做多）」開關
+    "real_enable_short": False,   # App 真實帳戶「反沖（做空）」開關
     "stop_loss_pct":  DAY_STOP_LOSS_PCT,
     "take_profit_pct":DAY_TAKE_PROFIT_PCT,
     "day_budget":     DAY_INITIAL_CAPITAL * DAY_PER_TRADE_PCT,
@@ -305,7 +337,8 @@ def _fetch_user_config() -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT auto_trade, stop_loss_pct, take_profit_pct, day_budget, max_positions,"
-                    " paper_budgets, enable_day, enable_short"
+                    " paper_budgets, enable_day, enable_short,"
+                    " COALESCE(real_enable_day, false), COALESCE(real_enable_short, false)"
                     " FROM platform_configs WHERE user_id = %s LIMIT 1",
                     (TRADING_USER_ID,),
                 )
@@ -322,6 +355,8 @@ def _fetch_user_config() -> dict:
                 "max_positions":  int(row[4]),
                 "enable_day":     bool(row[6]),
                 "enable_short":   bool(row[7]),
+                "real_enable_day":   bool(row[8]),
+                "real_enable_short": bool(row[9]),
             })
             budgets = [int(float(x)) for x in str(row[5] or "").split(",") if x.strip()]
             if budgets:
@@ -490,7 +525,11 @@ def _paper_account(cap: float) -> str:
 class DayTrader:
     """當沖紙上交易，每 1 分鐘 run_cycle() 一次；持倉時背景執行緒每 10 秒盯盤。"""
 
-    def __init__(self):
+    def __init__(self, real: bool = False):
+        # real=True：真實帳戶（account="real"），只送富邦委託、絕不紙上結算；
+        # real=False：模擬帳戶（主模擬 + 影子帳戶），永遠只做紙上交易。
+        self.real          = real
+        self._quote_fn     = None   # callable(code) -> 富邦 intraday quote（真實帳戶用）
         self._lock         = threading.RLock()
         self._state        = self._load_state()
         self._model        = self._load_model()
@@ -517,7 +556,8 @@ class DayTrader:
     # ── SDK 注入（真實下單）─────────────────────────────────────────────────────
 
     def set_real_trading(self, place_order_fn, check_filled_fn, cancel_order_fn=None,
-                         inventories_fn=None, unrealized_fn=None, daytrade_info_fn=None):
+                         inventories_fn=None, unrealized_fn=None, daytrade_info_fn=None,
+                         quote_fn=None):
         """
         注入 TradingBot 的下單 / 查詢成交 / 取消委託 / 庫存查詢 / 當沖資格查詢函式。
         呼叫後若 DAY_REAL_TRADING=true，買賣將透過 Fubon SDK 執行。
@@ -528,8 +568,36 @@ class DayTrader:
         self._inventories_fn    = inventories_fn
         self._unrealized_fn     = unrealized_fn
         self._daytrade_info_fn  = daytrade_info_fn
-        mode = "真實下單" if DAY_REAL_TRADING else "紙上（DAY_REAL_TRADING=false）"
-        logger.info(f"[DayTrader] set_real_trading 完成，模式={mode}  單筆上限={DAY_MAX_BUDGET:,.0f}")
+        self._quote_fn          = quote_fn
+        if not self.real:
+            raise RuntimeError("set_real_trading 只能用在真實帳戶 DayTrader(real=True)")
+        logger.info(f"[DayTrader-真實] 富邦下單已接上（DAY_REAL_TRADING={DAY_REAL_TRADING}），"
+                    f"單筆額度/最大持倉/開關由 App 設定")
+
+    # ── 真實帳戶：App 設定與即時報價 ────────────────────────────────────────────
+
+    def _real_ready(self) -> bool:
+        """真實下單所有條件：伺服器允許 + 已登入富邦 + App 自動下單開。"""
+        return (self.real and DAY_REAL_TRADING and self._place_order_fn is not None
+                and _fetch_user_config()["auto_trade"])
+
+    def _max_pos(self) -> int:
+        return int(_fetch_user_config()["max_positions"]) if self.real else DAY_MAX_POSITIONS
+
+    def _live_quote(self, code: str) -> dict:
+        if not self._quote_fn:
+            return _quote_prices(None)
+        try:
+            return _quote_prices(self._quote_fn(code))
+        except Exception as e:
+            logger.warning(f"[DayTrader-真實] {code} 富邦報價失敗: {e}")
+            return _quote_prices(None)
+
+    def _px(self, code: str) -> float | None:
+        """盯盤用現價：真實帳戶用富邦即時價，模擬帳戶用 yfinance。"""
+        if self.real:
+            return self._live_quote(code)["last"]
+        return _fast_price(code)
 
     # ── 10 秒背景盯盤 ─────────────────────────────────────────────────────────
 
@@ -568,7 +636,7 @@ class DayTrader:
                 is_short = h.get("direction") == "short"
                 code = h.get("code", key) if is_short else key
                 try:
-                    price = _fast_price(code)
+                    price = self._px(code)
                     if price is None:
                         continue
 
@@ -654,7 +722,7 @@ class DayTrader:
     # ── 狀態 I/O ─────────────────────────────────────────────────────────────
 
     def _load_state(self) -> dict:
-        path = _state_path()
+        path = _state_path(self.real)
         if path.exists():
             try:
                 with open(path, encoding="utf-8") as f:
@@ -664,39 +732,48 @@ class DayTrader:
                     state.pop("shadow_cash",     None)
                     state.pop("shadow_pnl",      None)
                     state.pop("shadow_holdings", None)
-                state.setdefault("shadows", _new_shadows())
+                state.setdefault("shadows", {} if self.real else _new_shadows())
                 return state
             except Exception:
                 pass
         return self._new_state()
 
     def _new_state(self) -> dict:
+        if self.real:
+            cfg = _fetch_user_config()
+            cap = float(cfg["day_budget"]) * int(cfg["max_positions"])   # 真實一天總額度 = 單筆 × 最大持倉
+        else:
+            cap = float(_paper_budgets()[0])
         return {
             "date":           str(datetime.now(TZ).date()),
-            "initial":        float(_paper_budgets()[0]),
-            "cash":           float(_paper_budgets()[0]),
+            "initial":        cap,
+            "cash":           cap,
             "holdings":       {},
             "trade_log":      [],
             "daily_pnl":      0.0,
             "watch_log":      {},
-            "shadows":        _new_shadows(),
+            "shadows":        {} if self.real else _new_shadows(),
             "short_cooldown": {},   # {code: last_cover_ts}
             "traded":         0.0,  # 今日累計進場金額（模擬額度 = 一天進場總額）
         }
 
     def _account(self, is_real: bool = False) -> str:
-        if is_real:
+        if is_real or self.real:
             return "real"
         return _paper_account(self._state.get("initial", DAY_INITIAL_CAPITAL))
 
-    def _trade_budget(self, for_real: bool = False) -> float:
-        """單筆預算：模擬 = 帳戶額度 × 比例；真實下單另受 DAY_MAX_BUDGET 限制。"""
-        initial = self._state.get("initial", DAY_INITIAL_CAPITAL)
-        budget = min(initial * DAY_PER_TRADE_PCT, self._state["cash"])
-        return min(budget, DAY_MAX_BUDGET) if for_real else min(budget, _day_room(self._state))
+    def _trade_budget(self) -> float:
+        """單筆預算：模擬 = 帳戶額度 × 比例；真實 = App 的單筆額度。兩者都受「今日剩餘額度」限制。"""
+        if self.real:
+            per = float(_fetch_user_config()["day_budget"])
+        else:
+            per = self._state.get("initial", DAY_INITIAL_CAPITAL) * DAY_PER_TRADE_PCT
+        return max(0.0, min(per, self._state["cash"], _day_room(self._state)))
 
     def _sync_shadows(self):
         """依 App 設定增減影子帳戶（需在 _lock 內呼叫）。有持倉的帳戶等平倉後才移除。"""
+        if self.real:
+            return
         shadows = self._state.setdefault("shadows", {})
         main_cap = int(self._state.get("initial", DAY_INITIAL_CAPITAL))
         want = {str(c) for c in _paper_budgets()[1:] if c != main_cap}
@@ -726,7 +803,7 @@ class DayTrader:
             # 寫入前把 pending orders 一併存入 state（啟動後可還原）
             self._state["pending_buy"]  = dict(self._pending_buy_orders)
             self._state["pending_sell"] = dict(self._pending_sell_orders)
-            with open(_state_path(), "w", encoding="utf-8") as f:
+            with open(_state_path(self.real), "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2, default=str)
         except Exception as e:
             logger.warning(f"[DayTrader] state 儲存失敗: {e}")
@@ -790,13 +867,27 @@ class DayTrader:
         # 也排除正在等待成交的買單（避免重複下單）
         if any(o["code"] == code and o["side"] == "BUY" for o in self._pending_buy_orders.values()):
             return False
-        if len(holdings) >= DAY_MAX_POSITIONS:
+        if len(holdings) + len(self._pending_buy_orders) >= self._max_pos():
             return False
 
-        # 單筆預算：資金比例 與 DAY_MAX_BUDGET 取較小值
-        real_path = (DAY_REAL_TRADING and self._place_order_fn is not None
-                     and _fetch_user_auto_trade())
-        budget  = self._trade_budget(for_real=real_path)
+        if self.real:
+            # 真實帳戶：條件不齊就不做（絕不退回紙上，紙上是模擬帳戶的事）
+            if not (self._real_ready() and _fetch_user_config()["real_enable_day"]):
+                return False
+            # 以富邦即時報價下單；訊號價（yfinance）落後太多 → 訊號已過時，放棄
+            q = self._live_quote(code)
+            live = q["ask"] or q["last"]
+            if not live:
+                logger.warning(f"[DayTrader-真實] {code} 取不到富邦即時報價，不下單")
+                return False
+            dev = live / price - 1
+            if abs(dev) > DAY_REAL_MAX_DEVIATION:
+                logger.info(f"[DayTrader-真實] {code} 即時價 {live:.2f} 與訊號價 {price:.2f} 差 {dev:+.2%}"
+                            f"（上限 ±{DAY_REAL_MAX_DEVIATION:.1%}），訊號過時不下單")
+                return False
+            price = live
+
+        budget  = self._trade_budget()
         # 當沖只能整張（零股不支援當沖），不足1張直接跳過
         shares = int(budget // (price * 1000)) * 1000
         if shares <= 0:
@@ -809,27 +900,24 @@ class DayTrader:
             return False
 
         # 真實下單路徑（非阻塞，等待下次 _confirm_pending_orders 確認成交）
-        if DAY_REAL_TRADING and self._place_order_fn is not None:
-            if not real_path:
-                # App 已關閉自動下單 → fall-through 到紙上交易
-                logger.info(f"[DayTrader] ⏸ {code} 自動下單已關閉，改為紙上交易")
-            else:
-                order_no = self._place_order_fn(code, "BUY", shares, price)
-                if not order_no:
-                    logger.warning(f"[DayTrader] ❌ {code} 真實買單送出失敗")
-                    return False
-                # 預扣資金，成交後才建倉；若失敗/超時則退款
-                self._state["cash"] -= total_cost
-                self._pending_buy_orders[order_no] = {
-                    "side": "BUY", "code": code, "shares": shares, "price": price,
-                    "reserved_cash": total_cost, "analysis": analysis,
-                    "predicted_gain": predicted_gain, "placed_at": time.time(),
-                }
-                logger.info(
-                    f"[DayTrader] ⏳ 真實買單送出 {code} {shares}股 @{price:.2f}"
-                    f"  上限={DAY_MAX_BUDGET:,.0f}  單號={order_no}"
-                )
-                return True
+        if self.real:
+            order_no = self._place_order_fn(code, "BUY", shares, price)
+            if not order_no:
+                logger.warning(f"[DayTrader-真實] ❌ {code} 真實買單送出失敗")
+                return False
+            # 預扣資金與當日額度，成交後才建倉；若失敗/超時則退款
+            self._state["cash"] -= total_cost
+            self._state["traded"] = self._state.get("traded", 0.0) + cost
+            self._pending_buy_orders[order_no] = {
+                "side": "BUY", "code": code, "shares": shares, "price": price,
+                "reserved_cash": total_cost, "reserved_traded": cost, "analysis": analysis,
+                "predicted_gain": predicted_gain, "placed_at": time.time(),
+            }
+            logger.info(
+                f"[DayTrader-真實] ⏳ 買單送出 {code} {shares}股 @{price:.2f}（富邦即時價）"
+                f"  單筆額度={_fetch_user_config()['day_budget']:,.0f}  單號={order_no}"
+            )
+            return True
 
         _cfg = _fetch_user_config()
         _sl  = _cfg["stop_loss_pct"]
@@ -878,7 +966,11 @@ class DayTrader:
             short_key = f"SHORT_{code}"
             if short_key in holdings or code in holdings:
                 return False
-            if len(holdings) >= DAY_MAX_POSITIONS:
+            if len(holdings) >= self._max_pos():
+                return False
+            if self.real:
+                # 真實先賣後買（融券/現股當沖賣出）尚未實作 → 真實帳戶不放空，也不轉紙上
+                logger.info(f"[DayTrader-真實] {code} 反沖訊號，但真實放空尚未支援，略過")
                 return False
 
             budget = self._trade_budget()
@@ -1177,8 +1269,10 @@ class DayTrader:
 
         # 真實下單路徑：只有真實買入的持倉（is_real=True）才走真實賣出，
         # 避免對紙上持倉下真實委託而出現「集保庫存不足」錯誤。
-        if DAY_REAL_TRADING and self._place_order_fn is not None and h.get("is_real"):
+        if self.real and self._place_order_fn is not None and h.get("is_real"):
             shares = h["shares"]
+            q = self._live_quote(code)
+            price = q["bid"] or q["last"] or price     # 以富邦即時價委託（yfinance 價只當備援）
             order_no = self._place_order_fn(code, "SELL", shares, price)
             if not order_no:
                 logger.warning(f"[DayTrader] ❌ {code} 真實賣單送出失敗，保留持倉等下次重試")
@@ -1367,6 +1461,7 @@ class DayTrader:
                 # 被拒：退還預扣資金，Telegram 告警
                 with self._lock:
                     self._state["cash"] += o["reserved_cash"]
+                    self._state["traded"] = self._state.get("traded", 0.0) - o.get("reserved_traded", 0.0)
                 logger.warning(f"[DayTrader] ❌ 買單被拒 {o['code']} {order_no}，已退款")
                 try:
                     from utils.telegram_notify import send
@@ -1385,6 +1480,7 @@ class DayTrader:
                     continue
                 with self._lock:
                     self._state["cash"] += o["reserved_cash"]
+                    self._state["traded"] = self._state.get("traded", 0.0) - o.get("reserved_traded", 0.0)
                 logger.warning(f"[DayTrader] ⏰ 買單超時取消完成 {o['code']} {order_no}，已退款")
                 buy_done.append(order_no)
         for no in buy_done:
@@ -1466,8 +1562,11 @@ class DayTrader:
                     continue   # 已成交或被拒 → 交給下一輪的正常路徑處理
                 new_no = None
                 if o.get("retries", 0) == 0 and self._place_order_fn:
-                    df = _fetch_intraday(o["code"])
-                    new_price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else o["price"]
+                    q = self._live_quote(o["code"])
+                    new_price = q["bid"] or q["last"]
+                    if not new_price:
+                        df = _fetch_intraday(o["code"])
+                        new_price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else o["price"]
                     new_no = self._place_order_fn(o["code"], "SELL", o["shares"], new_price)
                     if new_no:
                         self._pending_sell_orders[new_no] = dict(
@@ -1686,6 +1785,8 @@ class DayTrader:
             code = key
             df = _fetch_intraday(code)
             price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+            if self.real:
+                price = self._px(code) or price     # 真實持倉用富邦即時價判斷停損停利
             if price is None:
                 continue
 
@@ -1744,7 +1845,9 @@ class DayTrader:
         if not self._is_buy_window():
             return
 
-        real_full = len(self._state["holdings"]) >= DAY_MAX_POSITIONS
+        if self.real and not self._real_ready():
+            return     # 真實帳戶：伺服器/富邦/App 自動下單任一沒開 → 不掃描
+        real_full = len(self._state["holdings"]) + len(self._pending_buy_orders) >= self._max_pos()
         shadows   = self._state.get("shadows", {})
         all_shadow_full = (
             bool(shadows)
@@ -1772,8 +1875,15 @@ class DayTrader:
             )
 
         _ucfg = _fetch_user_config()
-        allow_long  = _ucfg["enable_day"]
-        allow_short = ENABLE_SHORT_TRADING and _ucfg["enable_short"]
+        if self.real:
+            # 真實帳戶用 App「真實交易」區的開關；真實放空尚未支援
+            allow_long  = _ucfg["real_enable_day"]
+            allow_short = False
+        else:
+            allow_long  = _ucfg["enable_day"]
+            allow_short = ENABLE_SHORT_TRADING and _ucfg["enable_short"]
+        if not allow_long and not allow_short and not shadows:
+            return
 
         long_real    = []
         short_real   = []
@@ -1851,7 +1961,7 @@ class DayTrader:
         # ── 真實多方進場 ──────────────────────────────────────────────────────
         long_real.sort(key=lambda x: x[1], reverse=True)
         for code, score, analysis in long_real:
-            if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
+            if len(self._state["holdings"]) + len(self._pending_buy_orders) >= self._max_pos():
                 break
             price = analysis["price"]
             predicted_gain: float | None = None
@@ -1877,6 +1987,8 @@ class DayTrader:
             )
             self._paper_buy(code, price, analysis, predicted_gain)
             try:
+                if self.real:
+                    raise RuntimeError("訊號只由模擬帳戶廣播")
                 from utils.platform_signal import broadcast as _bcast
                 reason = (f"score={score} delta={analysis.get('vol_delta_signal')}"
                           + (f" model={predicted_gain*100:.2f}%" if predicted_gain else ""))
@@ -1888,7 +2000,7 @@ class DayTrader:
         if ENABLE_SHORT_TRADING:
             short_real.sort(key=lambda x: x[1])
             for code, score, analysis in short_real:
-                if len(self._state["holdings"]) >= DAY_MAX_POSITIONS:
+                if len(self._state["holdings"]) >= self._max_pos():
                     break
                 price = analysis["price"]
                 logger.info(
@@ -1900,6 +2012,8 @@ class DayTrader:
                 )
                 self._paper_short(code, price, analysis)
                 try:
+                    if self.real:
+                        raise RuntimeError("訊號只由模擬帳戶廣播")
                     from utils.platform_signal import broadcast as _bcast
                     reason = f"score={score} delta={analysis.get('vol_delta_signal')} 反沖空頭"
                     _bcast(code, "SHORT", score, price, reason)
@@ -1994,8 +2108,9 @@ class DayTrader:
             if not self._is_market_open():
                 return
 
-        # 網路 I/O（下載 K 棒）在鎖外執行
-        self._alert_volume_surges()
+        # 網路 I/O（下載 K 棒）在鎖外執行；大量告警只由模擬帳戶發，避免重複推播
+        if not self.real:
+            self._alert_volume_surges()
 
         if ENABLE_DAY_TRADING:
             self._confirm_pending_orders()        # 確認上一輪委託是否成交
