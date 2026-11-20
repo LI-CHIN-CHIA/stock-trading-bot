@@ -21,7 +21,7 @@ _last: dict = {"ts": 0.0, "payload": None}
 def build_status(bot, real_day_bot) -> dict:
     from trader.day_trader import DAY_REAL_TRADING, DAY_REAL_MAX_DEVIATION
     logged_in = bool(getattr(bot, "sdk", None) is not None and getattr(bot, "account", None) is not None)
-    quote_ok, sample = None, None
+    quote_ok, sample, bars_ok, bars_n, bars_last = None, None, None, None, None
     if logged_in:
         try:
             from trader.day_trader import _quote_prices
@@ -29,6 +29,14 @@ def build_status(bot, real_day_bot) -> dict:
             quote_ok = sample["last"] is not None
         except Exception:
             quote_ok = False
+        try:
+            from trader.day_trader import _candles_df
+            df = _candles_df(bot.live_candles("2330"))
+            bars_ok = df is not None and len(df) > 0
+            if bars_ok:
+                bars_n, bars_last = len(df), str(df.index[-1])
+        except Exception:
+            bars_ok = False
     connected = real_day_bot is not None and getattr(real_day_bot, "_place_order_fn", None) is not None
     return {
         "real_trading_enabled": DAY_REAL_TRADING,   # 伺服器是否允許真實當沖
@@ -36,7 +44,10 @@ def build_status(bot, real_day_bot) -> dict:
         "live_quote_ok":        quote_ok,           # None = 未登入無法測
         "quote_sample_2330":    sample,
         "real_order_connected": connected,          # 真實帳戶已接上富邦下單
-        "real_short_supported": False,              # 真實先賣後買尚未實作
+        "live_bars_ok":         bars_ok,            # 富邦即時 1 分 K（真實訊號來源）
+        "live_bars_count":      bars_n,
+        "live_bars_last":       bars_last,
+        "real_short_supported": connected,          # 現股當沖先賣（OrderType.DayTrade）
         "paper_only_main_bot":  bool(getattr(bot, "paper_trading", True)),
         "max_signal_deviation": DAY_REAL_MAX_DEVIATION,
         "updated_at":           datetime.now(TZ).isoformat(timespec="seconds"),

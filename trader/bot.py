@@ -1200,10 +1200,22 @@ class TradingBot:
             logger.warning(f"富邦即時報價失敗 {code}: {e}")
             return None
 
-    def _place_order(self, code: str, side: str, shares: int, price: float, reason: str = "", proba: float = 0.0) -> str | None:
+    def live_candles(self, code: str):
+        """富邦即時 1 分 K（當日）；未登入或失敗回傳 None。"""
+        if self.sdk is None:
+            return None
+        try:
+            return self.sdk.marketdata.rest_client.stock.intraday.candles(symbol=code, timeframe="1")
+        except Exception as e:
+            logger.warning(f"富邦即時K線失敗 {code}: {e}")
+            return None
+
+    def _place_order(self, code: str, side: str, shares: int, price: float, reason: str = "",
+                     proba: float = 0.0, order_type: str = "Stock") -> str | None:
         """
         Place a buy or sell order. Returns order_no if submitted, else None.
         側: "BUY" or "SELL"
+        order_type: OrderType 名稱；"DayTrade" = 現股當沖先賣（反沖進場用）
         非市場時間（09:00~13:30 盤中、13:40~14:30 盤後）不下單。
         """
         if self.sdk is None or self.account is None:
@@ -1237,7 +1249,7 @@ class TradingBot:
             market_type=market_type,
             price_type=PriceType.Limit,
             time_in_force=TimeInForce.ROD,
-            order_type=OrderType.Stock,
+            order_type=getattr(OrderType, order_type),
             user_def="AI_BOT",
         )
         try:
@@ -1269,7 +1281,7 @@ class TradingBot:
         if result.is_success:
             seq_no = getattr(result.data, "seq_no", None) if result.data else None
             tag = "(重登後)" if relogged else ""
-            logger.info(f"委託送出{tag}: {side} {code} {shares}股 @ {limit_price} 序號={seq_no}")
+            logger.info(f"委託送出{tag}: {side}({order_type}) {code} {shares}股 @ {limit_price} 序號={seq_no}")
             return seq_no
         else:
             logger.error(f"委託失敗: {side} {code} {result.message}")

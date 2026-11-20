@@ -109,6 +109,33 @@ def _state_path(real: bool = False) -> Path:
 
 # 真實下單：委託前用富邦即時報價；與訊號價（yfinance，可能延遲）差太多就放棄這次訊號
 DAY_REAL_MAX_DEVIATION = float(os.getenv("DAY_REAL_MAX_DEVIATION", "0.015"))
+# 真實反沖進場委託類型（富邦 OrderType）：DayTrade = 現股當沖先賣；回補用一般現股買進
+DAY_SHORT_OPEN_ORDER_TYPE = os.getenv("DAY_SHORT_OPEN_ORDER_TYPE", "DayTrade")
+# 真實帳戶的進場訊號用富邦即時 1 分 K 計算（yfinance 只用來篩流動性）
+DAY_REAL_LIVE_BARS = os.getenv("DAY_REAL_LIVE_BARS", "true").lower() == "true"
+_COVER_TIMEOUT = 45   # 回補單幾秒沒成交就取消重下（先賣後買當日一定要買回）
+
+
+def _candles_df(resp) -> pd.DataFrame | None:
+    """富邦/Fugle intraday candles 回應 → 與 yfinance 相同欄位的 DataFrame。"""
+    if resp is None:
+        return None
+    data = resp.get("data") if isinstance(resp, dict) else getattr(resp, "data", None)
+    if not data:
+        return None
+    rows = []
+    for c in data:
+        g = (lambda k: c.get(k)) if isinstance(c, dict) else (lambda k: getattr(c, k, None))
+        try:
+            rows.append({"ts": pd.Timestamp(g("date")), "Open": float(g("open")), "High": float(g("high")),
+                         "Low": float(g("low")), "Close": float(g("close")), "Volume": float(g("volume") or 0)})
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return None
+    df = pd.DataFrame(rows).set_index("ts").sort_index()
+    df = df[df["Volume"] > 0]
+    return df if not df.empty else None
 
 
 def _quote_prices(q) -> dict:
@@ -530,6 +557,7 @@ class DayTrader:
         # real=False：模擬帳戶（主模擬 + 影子帳戶），永遠只做紙上交易。
         self.real          = real
         self._quote_fn     = None   # callable(code) -> 富邦 intraday quote（真實帳戶用）
+        self._candles_fn   = None   # callable(code) -> 富邦 intraday candles（真實帳戶訊號用）
         self._lock         = threading.RLock()
         self._state        = self._load_state()
         self._model        = self._load_model()
@@ -548,6 +576,8 @@ class DayTrader:
         # 從 state 還原（啟動後恢復未成交委託，避免重啟後遺漏）
         self._pending_buy_orders  = self._state.pop("pending_buy",  {})
         self._pending_sell_orders = self._state.pop("pending_sell", {})
+        self._pending_short_orders = self._state.pop("pending_short", {})   # 真實反沖進場（先賣）
+        self._pending_cover_orders = self._state.pop("pending_cover", {})   # 真實反沖回補（買回）
         self._last_monitoring_tg_ts: float = 0.0  # 上次盯盤 Telegram 發送時間
         # 若啟動時已有持倉（跨週期 reload），立即啟動背景監控
         if self._state.get("holdings"):
@@ -557,7 +587,7 @@ class DayTrader:
 
     def set_real_trading(self, place_order_fn, check_filled_fn, cancel_order_fn=None,
                          inventories_fn=None, unrealized_fn=None, daytrade_info_fn=None,
-                         quote_fn=None):
+                         quote_fn=None, candles_fn=None):
         """
         注入 TradingBot 的下單 / 查詢成交 / 取消委託 / 庫存查詢 / 當沖資格查詢函式。
         呼叫後若 DAY_REAL_TRADING=true，買賣將透過 Fubon SDK 執行。
@@ -569,6 +599,7 @@ class DayTrader:
         self._unrealized_fn     = unrealized_fn
         self._daytrade_info_fn  = daytrade_info_fn
         self._quote_fn          = quote_fn
+        self._candles_fn        = candles_fn
         if not self.real:
             raise RuntimeError("set_real_trading 只能用在真實帳戶 DayTrader(real=True)")
         logger.info(f"[DayTrader-真實] 富邦下單已接上（DAY_REAL_TRADING={DAY_REAL_TRADING}），"
@@ -592,6 +623,28 @@ class DayTrader:
         except Exception as e:
             logger.warning(f"[DayTrader-真實] {code} 富邦報價失敗: {e}")
             return _quote_prices(None)
+
+    def _live_bars(self, code: str) -> pd.DataFrame | None:
+        if not self._candles_fn:
+            return None
+        try:
+            return _candles_df(self._candles_fn(code))
+        except Exception as e:
+            logger.warning(f"[DayTrader-真實] {code} 富邦即時K線失敗: {e}")
+            return None
+
+    def _bars(self, code: str) -> pd.DataFrame | None:
+        """持倉監控用 K 線：真實帳戶優先富邦即時，模擬帳戶用 yfinance。"""
+        if self.real and DAY_REAL_LIVE_BARS:
+            df = self._live_bars(code)
+            if df is not None and not df.empty:
+                return df
+        return _fetch_intraday(code)
+
+    def _n_positions(self) -> int:
+        """持倉 + 所有進行中委託（真實帳戶的委託未成交前也佔一個名額）。"""
+        return (len(self._state["holdings"]) + len(self._pending_buy_orders)
+                + len(self._pending_short_orders) + len(self._pending_cover_orders))
 
     def _px(self, code: str) -> float | None:
         """盯盤用現價：真實帳戶用富邦即時價，模擬帳戶用 yfinance。"""
@@ -803,6 +856,8 @@ class DayTrader:
             # 寫入前把 pending orders 一併存入 state（啟動後可還原）
             self._state["pending_buy"]  = dict(self._pending_buy_orders)
             self._state["pending_sell"] = dict(self._pending_sell_orders)
+            self._state["pending_short"] = dict(self._pending_short_orders)
+            self._state["pending_cover"] = dict(self._pending_cover_orders)
             with open(_state_path(self.real), "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2, default=str)
         except Exception as e:
@@ -829,6 +884,8 @@ class DayTrader:
             self._state["date"] = today
             self._pending_buy_orders  = {}
             self._pending_sell_orders = {}
+            self._pending_short_orders = {}
+            self._pending_cover_orders = {}
             logger.info(f"[DayTrader] 昨日損益 {closed_pnl:+,.0f} TWD")
 
     # ── 時間判斷 ──────────────────────────────────────────────────────────────
@@ -867,7 +924,7 @@ class DayTrader:
         # 也排除正在等待成交的買單（避免重複下單）
         if any(o["code"] == code and o["side"] == "BUY" for o in self._pending_buy_orders.values()):
             return False
-        if len(holdings) + len(self._pending_buy_orders) >= self._max_pos():
+        if self._n_positions() >= self._max_pos():
             return False
 
         if self.real:
@@ -966,12 +1023,10 @@ class DayTrader:
             short_key = f"SHORT_{code}"
             if short_key in holdings or code in holdings:
                 return False
-            if len(holdings) >= self._max_pos():
+            if self._n_positions() >= self._max_pos():
                 return False
             if self.real:
-                # 真實先賣後買（融券/現股當沖賣出）尚未實作 → 真實帳戶不放空，也不轉紙上
-                logger.info(f"[DayTrader-真實] {code} 反沖訊號，但真實放空尚未支援，略過")
-                return False
+                return self.__real_short(code, price, analysis)   # 只送富邦委託，絕不轉紙上
 
             budget = self._trade_budget()
             shares = int(budget // (price * 1000)) * 1000
@@ -1015,6 +1070,84 @@ class DayTrader:
             self._start_fast_monitor()
             return True
 
+    def __real_short(self, code: str, price: float, analysis: dict) -> bool:
+        """真實反沖進場：富邦現股當沖先賣（需在 _lock 內呼叫）。成交後才建倉。"""
+        cfg = _fetch_user_config()
+        if not (self._real_ready() and cfg["real_enable_short"]):
+            return False
+        if any(o["code"] == code for o in
+               list(self._pending_short_orders.values()) + list(self._pending_cover_orders.values())):
+            return False
+        q = self._live_quote(code)
+        live = q["bid"] or q["last"]
+        if not live:
+            logger.warning(f"[DayTrader-真實] {code} 取不到富邦即時報價，不放空")
+            return False
+        dev = live / price - 1
+        if abs(dev) > DAY_REAL_MAX_DEVIATION:
+            logger.info(f"[DayTrader-真實] {code} 即時價 {live:.2f} 與訊號價 {price:.2f} 差 {dev:+.2%}"
+                        f"（上限 ±{DAY_REAL_MAX_DEVIATION:.1%}），不放空")
+            return False
+        shares = int(self._trade_budget() // (live * 1000)) * 1000
+        if shares <= 0:
+            return False
+        value = shares * live
+        order_no = self._place_order_fn(code, "SELL", shares, live, order_type=DAY_SHORT_OPEN_ORDER_TYPE)
+        if not order_no:
+            logger.warning(f"[DayTrader-真實] ❌ {code} 反沖先賣委託送出失敗")
+            self._alert(f"❌ <b>反沖先賣送出失敗</b> {code} {shares}股 @{live:.2f}\n"
+                        f"請確認富邦帳戶已開通現股當沖先賣", key=f"short_fail:{code}", cooldown=600)
+            return False
+        # 預扣額度（成交後才建倉；被拒/超時退回）
+        self._state["cash"]  -= value
+        self._state["traded"] = self._state.get("traded", 0.0) + value
+        self._pending_short_orders[order_no] = {
+            "side": "SHORT", "code": code, "shares": shares, "price": live,
+            "reserved": value, "analysis": analysis, "placed_at": time.time(),
+        }
+        logger.info(f"[DayTrader-真實] ⏳ 反沖先賣送出 {code} {shares}股 @{live:.2f}（富邦即時價）"
+                    f"  單筆額度={cfg['day_budget']:,.0f}  單號={order_no}")
+        return True
+
+    def __real_cover(self, h: dict, price: float, reason: str) -> float:
+        """真實反沖回補：以富邦即時賣一價買回（需在 _lock 內呼叫）。損益等成交後計算。"""
+        code = h["code"]
+        if any(o["code"] == code for o in self._pending_cover_orders.values()):
+            return 0.0
+        retries = int(h.get("cover_retries", 0))
+        q = self._live_quote(code)
+        px = q["ask"] or q["last"] or price
+        px = px * (1 + 0.002 * min(retries, 5))     # 重試時逐步加價，確保當日買回
+        order_no = self._place_order_fn(code, "BUY", h["shares"], px)
+        if not order_no:
+            h["force_exit"] = reason                 # 留著持倉，下一輪（或 10 秒盯盤）再送
+            self._alert(f"🚨 <b>反沖回補送出失敗</b> {code} {h['shares']}股\n原因={reason}\n"
+                        f"先賣部位必須當日買回，系統會持續重試；必要時請手動回補",
+                        key=f"cover_fail:{code}", cooldown=60)
+            return 0.0
+        self._state["holdings"].pop(f"SHORT_{code}", None)
+        self._pending_cover_orders[order_no] = dict(h, price=px, reason=reason,
+                                                    placed_at=time.time(), cancel_sent=False)
+        logger.info(f"[DayTrader-真實] ⏳ 反沖回補送出 {code} {h['shares']}股 @{px:.2f}"
+                    f"  原因={reason}  單號={order_no}")
+        return 0.0
+
+    def _requeue_real_short(self, o: dict, shares: int | None = None):
+        """回補沒成交：把空單放回持倉並標記 force_exit，下一輪立即再回補（需在 _lock 內呼叫）。"""
+        key = f"SHORT_{o['code']}"
+        if key in self._state["holdings"]:
+            return
+        h = {k: v for k, v in o.items()
+             if k not in ("price", "reason", "placed_at", "cancel_sent", "analysis")}
+        if shares is not None and shares != o["shares"]:
+            ratio = shares / o["shares"]
+            h["proceeds"] = o["proceeds"] * ratio
+            h["reserved"] = o.get("reserved", 0.0) * ratio
+            h["shares"]   = shares
+        h["force_exit"]    = o.get("reason", "重試回補")
+        h["cover_retries"] = int(o.get("cover_retries", 0)) + 1
+        self._state["holdings"][key] = h
+
     def _paper_cover(self, code: str, price: float, reason: str) -> float:
         """空方平倉：買回，計算損益。"""
         with self._lock:
@@ -1022,6 +1155,10 @@ class DayTrader:
             short_key = f"SHORT_{code}"
             if short_key not in holdings:
                 return 0.0
+            if self.real:
+                if not holdings[short_key].get("is_real") or self._place_order_fn is None:
+                    return 0.0
+                return self.__real_cover(holdings[short_key], price, reason)
             h = holdings.pop(short_key)
             shares = h["shares"]
             buy_back = shares * price
@@ -1585,6 +1722,147 @@ class DayTrader:
         for no in sell_done:
             del self._pending_sell_orders[no]
 
+        self._confirm_short_orders()
+
+    def _confirm_short_orders(self):
+        """真實反沖：確認先賣（進場）與買回（回補）委託。回補沒成交就一直重下，直到買回為止。"""
+        cfg = _fetch_user_config()
+        # ── 先賣進場 ─────────────────────────────────────────────────────────
+        done = []
+        for order_no, o in list(self._pending_short_orders.items()):
+            filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled > 0:
+                price = fill_price if fill_price > 0 else o["price"]
+                value = filled * price
+                fee   = max(_MIN_FEE, round(value * _COMMISSION_RATE))
+                stt   = round(value * _STT_RATE)
+                reserved = o["reserved"] * filled / o["shares"]
+                with self._lock:
+                    self._state["cash"]  += o["reserved"] - reserved            # 未成交部分退回
+                    self._state["traded"] += value - o["reserved"]               # 以實際成交額計
+                    self._state["holdings"][f"SHORT_{o['code']}"] = {
+                        "code": o["code"], "direction": "short", "shares": filled,
+                        "entry_price": price, "entry_time": self._now_tw().strftime("%H:%M"),
+                        "entry_ts": time.time(), "is_real": True,
+                        "proceeds": value - fee - stt, "reserved": reserved,
+                        "stop_loss":   round(price * (1 + abs(cfg["stop_loss_pct"])), 2),
+                        "take_profit": round(price * (1 - abs(cfg["take_profit_pct"])), 2),
+                    }
+                    self._log_trade(o["code"], "SHORT", filled, price, "反沖賣出(真實)",
+                                    o.get("analysis") or {}, is_real=True, order_no=order_no)
+                try:
+                    from utils.platform_signal import report_position as _rpos
+                    _rpos(TRADING_USER_ID, o["code"], "SHORT", filled, price, is_real=True, account="real")
+                except Exception:
+                    pass
+                logger.info(f"[DayTrader-真實] ✅ 反沖先賣成交 {o['code']} {filled}股 @{price:.2f}")
+                try:
+                    from utils.telegram_notify import notify_buy
+                    notify_buy("反沖(真實)", o["code"], filled, price,
+                               f"score={(o.get('analysis') or {}).get('score', '')} 先賣成交")
+                except Exception:
+                    pass
+                if filled < o["shares"] and self._cancel_order_fn and not o.get("cancel_sent"):
+                    self._cancel_order_fn(o["code"], order_no)
+                    self._alert(f"⚠️ <b>反沖先賣部分成交</b> {o['code']} {filled}/{o['shares']}股\n"
+                                f"剩餘委託已送取消", key=f"short_partial:{order_no}")
+                self._start_fast_monitor()
+                done.append(order_no)
+            elif filled == -1:
+                with self._lock:
+                    self._state["cash"]  += o["reserved"]
+                    self._state["traded"] = self._state.get("traded", 0.0) - o["reserved"]
+                logger.warning(f"[DayTrader-真實] ❌ 反沖先賣被拒 {o['code']} {order_no}，已退回額度")
+                self._alert(f"❌ <b>反沖先賣被拒</b> {o['code']} 委託價={o['price']:.2f}\n"
+                            f"可能不在可先賣名單或額度不足，請查看富邦委託回報",
+                            key=f"short_reject:{order_no}")
+                done.append(order_no)
+            elif time.time() - o["placed_at"] > 120:
+                if not o.get("cancel_sent"):
+                    if self._cancel_order_fn:
+                        self._cancel_order_fn(o["code"], order_no)
+                    o["cancel_sent"] = True
+                    continue
+                with self._lock:
+                    self._state["cash"]  += o["reserved"]
+                    self._state["traded"] = self._state.get("traded", 0.0) - o["reserved"]
+                logger.warning(f"[DayTrader-真實] ⏰ 反沖先賣超時取消 {o['code']} {order_no}，已退回額度")
+                done.append(order_no)
+        for no in done:
+            del self._pending_short_orders[no]
+
+        # ── 買回回補 ─────────────────────────────────────────────────────────
+        done = []
+        for order_no, o in list(self._pending_cover_orders.items()):
+            filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled > 0:
+                price = fill_price if fill_price > 0 else o["price"]
+                buy_back = filled * price
+                fee  = max(_MIN_FEE, round(buy_back * _COMMISSION_RATE))
+                part = filled / o["shares"]
+                pnl  = o["proceeds"] * part - (buy_back + fee)
+                remaining = max(o["shares"] - filled, 0)
+                with self._lock:
+                    self._state["cash"]      += o.get("reserved", 0.0) * part + pnl
+                    self._state["daily_pnl"] += pnl
+                    self._state.setdefault("short_cooldown", {})[o["code"]] = time.time()
+                    self._log_trade(o["code"], "COVER", filled, price, o["reason"], {},
+                                    is_real=True, pnl=pnl, order_no=order_no)
+                    if remaining:
+                        self._requeue_real_short(o, shares=remaining)
+                if remaining:
+                    if self._cancel_order_fn and not o.get("cancel_sent"):
+                        self._cancel_order_fn(o["code"], order_no)
+                    self._alert(f"⚠️ <b>反沖回補部分成交</b> {o['code']} {filled}/{o['shares']}股\n"
+                                f"剩餘 {remaining} 股繼續買回", key=f"cover_partial:{order_no}")
+                try:
+                    from utils.platform_signal import report_position as _rpos
+                    _rpos(TRADING_USER_ID, o["code"], "SHORT", remaining, o["entry_price"],
+                          is_real=True, account="real")
+                except Exception:
+                    pass
+                logger.info(f"[DayTrader-真實] {'🟩' if pnl >= 0 else '🟥'} 反沖回補成交 {o['code']}"
+                            f" {filled}股 @{price:.2f}  損益={pnl:+,.0f}  原因={o['reason']}")
+                try:
+                    from utils.telegram_notify import notify_sell
+                    notify_sell("反沖(真實)", o["code"], filled, price, pnl, o["reason"])
+                except Exception:
+                    pass
+                done.append(order_no)
+            elif filled == -1:
+                with self._lock:
+                    self._requeue_real_short(o)
+                self._alert(f"🚨 <b>反沖回補被拒</b> {o['code']} {o['shares']}股\n"
+                            f"系統會立即重下；若持續失敗請手動買回", key=f"cover_reject:{order_no}", cooldown=60)
+                done.append(order_no)
+            elif time.time() - o["placed_at"] > _COVER_TIMEOUT:
+                if not o.get("cancel_sent"):
+                    if self._cancel_order_fn:
+                        self._cancel_order_fn(o["code"], order_no)
+                    o["cancel_sent"] = True
+                    continue
+                again, _ = self._check_filled_fn(o["code"], order_no)
+                if again != 0:
+                    continue        # 取消前已成交或被拒 → 下一輪正常路徑處理
+                with self._lock:
+                    self._requeue_real_short(o)
+                if int(o.get("cover_retries", 0)) >= 1:
+                    self._alert(f"🚨 <b>反沖回補未成交</b> {o['code']} {o['shares']}股\n"
+                                f"已重試 {int(o.get('cover_retries', 0)) + 1} 次，持續加價買回中",
+                                key=f"cover_stuck:{o['code']}", cooldown=120)
+                done.append(order_no)
+        for no in done:
+            del self._pending_cover_orders[no]
+
+        now = self._now_tw()
+        if (now.hour, now.minute) >= (13, 25):
+            open_shorts = [h["code"] for h in self._state["holdings"].values()
+                           if h.get("direction") == "short" and h.get("is_real")]
+            open_shorts += [o["code"] for o in self._pending_cover_orders.values()]
+            if open_shorts:
+                self._alert(f"🚨🚨 <b>13:25 仍有未買回的先賣部位</b>：{', '.join(sorted(set(open_shorts)))}\n"
+                            f"請立即手動回補，避免違約交割", key="short_eod", cooldown=120)
+
     # ── 當沖資格查詢 ─────────────────────────────────────────────────────────
 
     def _check_daytrade_eligible(self, code: str) -> bool:
@@ -1678,8 +1956,8 @@ class DayTrader:
                 holdings = self._state["holdings"]
                 for code in list(holdings):
                     h = holdings[code]
-                    if not h.get("is_real"):
-                        continue
+                    if not h.get("is_real") or h.get("direction") == "short":
+                        continue   # 先賣部位不會出現在現股庫存，不能拿庫存校正
 
                     # 富邦已無庫存 → 移除假持倉（可能已被其他路徑成交）
                     if code not in fubon_qty:
@@ -1752,8 +2030,10 @@ class DayTrader:
             # 空方持倉（key = "SHORT_{code}"）
             if h.get("direction") == "short":
                 code = h["code"]
-                df = _fetch_intraday(code)
+                df = self._bars(code)
                 price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+                if self.real:
+                    price = self._px(code) or price     # 真實空單用富邦即時價
                 if price is None:
                     continue
                 entry_ts = h.get("entry_ts")
@@ -1761,6 +2041,9 @@ class DayTrader:
 
                 if force_close:
                     self._paper_cover(code, price, "強制平倉 13:20")
+                    continue
+                if h.get("force_exit"):
+                    self._paper_cover(code, price, str(h["force_exit"]))
                     continue
                 if price >= h["stop_loss"]:
                     self._paper_cover(code, price, f"停損 {h['stop_loss']:.2f}")
@@ -1783,7 +2066,7 @@ class DayTrader:
 
             # 多方持倉（key = code）
             code = key
-            df = _fetch_intraday(code)
+            df = self._bars(code)
             price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
             if self.real:
                 price = self._px(code) or price     # 真實持倉用富邦即時價判斷停損停利
@@ -1847,7 +2130,7 @@ class DayTrader:
 
         if self.real and not self._real_ready():
             return     # 真實帳戶：伺服器/富邦/App 自動下單任一沒開 → 不掃描
-        real_full = len(self._state["holdings"]) + len(self._pending_buy_orders) >= self._max_pos()
+        real_full = self._n_positions() >= self._max_pos()
         shadows   = self._state.get("shadows", {})
         all_shadow_full = (
             bool(shadows)
@@ -1876,9 +2159,9 @@ class DayTrader:
 
         _ucfg = _fetch_user_config()
         if self.real:
-            # 真實帳戶用 App「真實交易」區的開關；真實放空尚未支援
+            # 真實帳戶用 App「真實交易」區的開關
             allow_long  = _ucfg["real_enable_day"]
-            allow_short = False
+            allow_short = ENABLE_SHORT_TRADING and _ucfg["real_enable_short"]
         else:
             allow_long  = _ucfg["enable_day"]
             allow_short = ENABLE_SHORT_TRADING and _ucfg["enable_short"]
@@ -1918,7 +2201,19 @@ class DayTrader:
             vol_ratio = (last_vol / avg_vol) if avg_vol > 0 else 0
 
             if avg_vol < DAY_MIN_AVG_VOLUME:
-                continue
+                continue     # 流動性篩選（yfinance 延遲不影響）
+
+            if self.real and DAY_REAL_LIVE_BARS:
+                # 真實帳戶：訊號改用富邦即時 1 分 K 重算；拿不到即時 K 就不做（絕不用延遲資料下真實單）
+                live_df = self._live_bars(code)
+                live = _analyze_bars(live_df) if live_df is not None and len(live_df) >= 5 else {}
+                if not live:
+                    continue
+                analysis  = live
+                avg_vol   = live.get("avg_volume", 0)
+                last_vol  = live.get("last_volume", 0)
+                vol_ratio = (last_vol / avg_vol) if avg_vol > 0 else 0
+
             if last_vol < avg_vol * DAY_MIN_ENTRY_VOL_PCT:
                 continue
 
@@ -1961,7 +2256,7 @@ class DayTrader:
         # ── 真實多方進場 ──────────────────────────────────────────────────────
         long_real.sort(key=lambda x: x[1], reverse=True)
         for code, score, analysis in long_real:
-            if len(self._state["holdings"]) + len(self._pending_buy_orders) >= self._max_pos():
+            if self._n_positions() >= self._max_pos():
                 break
             price = analysis["price"]
             predicted_gain: float | None = None
@@ -2000,7 +2295,7 @@ class DayTrader:
         if ENABLE_SHORT_TRADING:
             short_real.sort(key=lambda x: x[1])
             for code, score, analysis in short_real:
-                if len(self._state["holdings"]) >= self._max_pos():
+                if self._n_positions() >= self._max_pos():
                     break
                 price = analysis["price"]
                 logger.info(

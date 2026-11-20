@@ -537,6 +537,7 @@ def main():
                     daytrade_info_fn  = lambda code: bot._call_with_relogin(
                         lambda: bot.sdk.stock.daytrade_and_stock_info(bot.account, code)),
                     quote_fn          = bot.live_quote,
+                    candles_fn        = bot.live_candles,
                 )
         else:
             logger.error("❌ 富邦登入失敗，真實當沖不會下單")

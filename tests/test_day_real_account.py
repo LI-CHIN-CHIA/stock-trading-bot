@@ -36,6 +36,8 @@ def _bare(real: bool) -> d.DayTrader:
     t._inventories_fn = t._unrealized_fn = t._daytrade_info_fn = None
     t._daytrade_cache = {}
     t._pending_buy_orders, t._pending_sell_orders = {}, {}
+    t._pending_short_orders, t._pending_cover_orders = {}, {}
+    t._candles_fn = None
     t._state = t._new_state()
     t._log_trade = lambda *a, **k: None
     t._start_fast_monitor = lambda: None
@@ -47,8 +49,9 @@ def _real(quote=None, orders=None):
     t = _bare(True)
     orders = [] if orders is None else orders
 
-    def place(code, side, shares, price):
-        orders.append((code, side, shares, price))
+    def place(code, side, shares, price, order_type="Stock"):
+        orders.append((code, side, shares, price) if order_type == "Stock"
+                      else (code, side, shares, price, order_type))
         return f"NO{len(orders)}"
     t._place_order_fn = place
     t._quote_fn = lambda code: quote
@@ -115,10 +118,91 @@ def test_real_daily_total_is_budget_times_positions(cfg):
     assert len(orders) == 2                # 第 3 筆起當日額度用完
 
 
-def test_real_short_is_not_sent_and_not_papered():
+def test_real_short_sends_daytrade_sell_at_live_bid():
+    t, orders = _real(Q)
+    assert t._paper_short("2337", 50.0, {}) is True
+    assert orders == [("2337", "SELL", 2000, 50.0, "DayTrade")]       # 現股當沖先賣、富邦買一價
+    assert t._state["holdings"] == {}                                   # 成交前不建倉
+    assert len(t._pending_short_orders) == 1 and t._state["traded"] == 100_000
+
+
+def test_real_short_blocked_by_app_switch(cfg):
+    cfg["real_enable_short"] = False
     t, orders = _real(Q)
     assert t._paper_short("2337", 50.0, {}) is False
     assert orders == [] and t._state["holdings"] == {}
+
+
+def _filled_short(fills):
+    t, orders = _real(Q)
+    t._check_filled_fn = lambda code, no: fills.get(no, (0, 0.0))
+    t._paper_short("2337", 50.0, {})
+    return t, orders
+
+
+def test_real_short_fill_then_cover_pnl():
+    fills = {"NO1": (2000, 50.0)}
+    t, orders = _filled_short(fills)
+    t._confirm_pending_orders()
+    h = t._state["holdings"]["SHORT_2337"]
+    assert h["is_real"] and h["shares"] == 2000 and h["entry_price"] == 50.0
+    cash_open = t._state["cash"]
+    t._paper_cover("2337", 49.0, "停利")
+    assert orders[-1] == ("2337", "BUY", 2000, 50.1)                    # 富邦賣一價買回
+    assert "SHORT_2337" not in t._state["holdings"]                     # 等成交
+    fills["NO2"] = (2000, 49.0)
+    t._confirm_pending_orders()
+    assert t._pending_cover_orders == {}
+    pnl = t._state["daily_pnl"]
+    assert 1500 < pnl < 2000                                              # 1000 元價差扣手續費/證交稅
+    assert abs(t._state["cash"] - (cash_open + 100_000 + pnl)) < 1e-6
+
+
+def test_real_short_reject_refunds():
+    t, orders = _filled_short({"NO1": (-1, 0.0)})
+    t._confirm_pending_orders()
+    assert t._pending_short_orders == {} and t._state["holdings"] == {}
+    assert t._state["traded"] == 0 and t._state["cash"] == t._state["initial"]
+
+
+def test_real_cover_timeout_retries_until_bought_back(monkeypatch):
+    fills = {"NO1": (2000, 50.0)}
+    t, orders = _filled_short(fills)
+    t._confirm_pending_orders()
+    t._paper_cover("2337", 49.0, "停損")
+    no = next(iter(t._pending_cover_orders))
+    t._pending_cover_orders[no]["placed_at"] -= 999
+    t._confirm_pending_orders()              # 第一輪：送取消
+    t._confirm_pending_orders()              # 第二輪：確認沒成交 → 放回持倉並標記重下
+    h = t._state["holdings"]["SHORT_2337"]
+    assert h["force_exit"] == "停損" and h["cover_retries"] == 1
+    t._check_holdings = d.DayTrader._check_holdings.__get__(t)
+    t._bars = lambda code: None
+    t._px = lambda code: 49.5
+    t._check_holdings()
+    assert orders[-1][1] == "BUY" and orders[-1][3] > 50.1                 # 重試加價買回
+
+
+def test_inventory_sync_does_not_drop_real_shorts():
+    t, _ = _real(Q)
+    t._state["holdings"]["SHORT_2337"] = {"code": "2337", "direction": "short", "shares": 1000,
+                                          "entry_price": 50.0, "is_real": True, "entry_ts": 0}
+    class R:  # 富邦現股庫存沒有先賣部位
+        is_success, data = True, []
+    t._inventories_fn = lambda: R()
+    for _ in range(3):
+        t._sync_day_holdings_from_fubon()
+    assert "SHORT_2337" in t._state["holdings"]
+
+
+def test_candles_parsing():
+    resp = {"symbol": "2330", "data": [
+        {"date": "2026-11-20T09:00:00.000+08:00", "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 0},
+        {"date": "2026-11-20T09:01:00.000+08:00", "open": 10.5, "high": 11, "low": 10, "close": 10.8, "volume": 120},
+    ]}
+    df = d._candles_df(resp)
+    assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"] and len(df) == 1
+    assert d._candles_df(None) is None and d._candles_df({"data": []}) is None
 
 
 def test_real_sell_uses_live_bid():
