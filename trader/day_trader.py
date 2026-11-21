@@ -113,6 +113,37 @@ DAY_REAL_MAX_DEVIATION = float(os.getenv("DAY_REAL_MAX_DEVIATION", "0.015"))
 DAY_SHORT_OPEN_ORDER_TYPE = os.getenv("DAY_SHORT_OPEN_ORDER_TYPE", "DayTrade")
 # 真實帳戶的進場訊號用富邦即時 1 分 K 計算（yfinance 只用來篩流動性）
 DAY_REAL_LIVE_BARS = os.getenv("DAY_REAL_LIVE_BARS", "true").lower() == "true"
+# 金管會 2026-11-20 起：前一日收盤跌幅 ≥3.5% 的股票，隔日以低於前收先賣（現股當沖）若沒買回，
+# 不能改成融券/借券賣出 → 會違約。真實反沖遇到這種情況直接不放空。
+DAY_SHORT_LIMIT_DROP = float(os.getenv("DAY_SHORT_LIMIT_DROP", "0.035"))
+_prev_closes: dict = {}   # code -> (date, prev_close, prev_day_change)
+
+
+def _prev_day(code: str):
+    """(前一交易日收盤, 前一交易日漲跌幅)；每檔每天查一次日線，失敗回 None。"""
+    today = str(datetime.now(TZ).date())
+    hit = _prev_closes.get(code)
+    if hit and hit[0] == today:
+        return hit[1:]
+    try:
+        d = yf.Ticker(_symbol(code)).history(period="10d", interval="1d")["Close"].dropna()
+        d = d[[x.date() < datetime.now(TZ).date() for x in d.index.tz_convert(TZ)]]
+        out = (float(d.iloc[-1]), float(d.iloc[-1] / d.iloc[-2] - 1)) if len(d) >= 2 else None
+    except Exception:
+        out = None
+    if out:
+        _prev_closes[code] = (today, *out)
+    return out
+
+
+def _short_restricted(code: str, price: float) -> bool:
+    pd_ = _prev_day(code)
+    if pd_ is None:
+        return True            # 查不到前日資料 → 保守不放空（真實帳戶）
+    prev_close, chg = pd_
+    return chg <= -DAY_SHORT_LIMIT_DROP and price < prev_close
+
+
 _COVER_TIMEOUT = 45   # 回補單幾秒沒成交就取消重下（先賣後買當日一定要買回）
 
 
@@ -1091,6 +1122,10 @@ class DayTrader:
         if abs(dev) > DAY_REAL_MAX_DEVIATION:
             logger.info(f"[DayTrader-真實] {code} 即時價 {live:.2f} 與訊號價 {price:.2f} 差 {dev:+.2%}"
                         f"（上限 ±{DAY_REAL_MAX_DEVIATION:.1%}），不放空")
+            return False
+        if _short_restricted(code, live):
+            logger.info(f"[DayTrader-真實] {code} 前日跌≥{DAY_SHORT_LIMIT_DROP:.1%} 且先賣價 {live:.2f} 低於前收"
+                        f"（限空令：沒買回不能轉融券），不放空")
             return False
         shares = int(self._trade_budget() // (live * 1000)) * 1000
         if shares <= 0:

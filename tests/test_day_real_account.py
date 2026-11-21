@@ -17,6 +17,7 @@ import trader.day_trader as d
 @pytest.fixture(autouse=True)
 def cfg(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(d, "_prev_day", lambda code: (49.0, 0.0))   # 前日平盤：不受限空令影響
     monkeypatch.setattr(d, "DAY_REAL_TRADING", True)
     c = d._user_config_cache
     saved = dict(c)
@@ -257,3 +258,12 @@ def test_no_long_and_short_on_same_code():
     assert t._paper_short("2337", 50.0, {}) is True
     assert t._paper_buy("2337", 50.0, {}) is False
     assert len(orders) == 1
+
+
+def test_real_short_respects_fsc_price_limit(monkeypatch):
+    monkeypatch.setattr(d, "_prev_day", lambda code: (51.0, -0.05))   # 前日跌 5%，先賣價 50 < 前收 51
+    t, orders = _real(Q)
+    assert t._paper_short("2337", 50.0, {}) is False and orders == []
+    monkeypatch.setattr(d, "_prev_day", lambda code: (49.0, -0.05))   # 先賣價高於前收 → 允許
+    t, orders = _real(Q)
+    assert t._paper_short("2337", 50.0, {}) is True
