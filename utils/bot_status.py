@@ -25,8 +25,12 @@ def build_status(bot, real_day_bot) -> dict:
     if logged_in:
         try:
             from trader.day_trader import _quote_prices
-            sample = _quote_prices(bot.live_quote("2330"))   # 用 bot 實際的解析方式驗證格式
+            raw = bot.live_quote("2330")
+            sample = _quote_prices(raw)   # 用 bot 實際的解析方式驗證格式
             quote_ok = sample["last"] is not None
+            from trader.trend_trader import parse_quote
+            tq = parse_quote(raw)
+            sample["open"], sample["value"] = (tq or {}).get("open"), (tq or {}).get("value")
         except Exception:
             quote_ok = False
         try:
