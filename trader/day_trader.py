@@ -924,6 +924,9 @@ class DayTrader:
         # 也排除正在等待成交的買單（避免重複下單）
         if any(o["code"] == code and o["side"] == "BUY" for o in self._pending_buy_orders.values()):
             return False
+        if f"SHORT_{code}" in holdings or any(o["code"] == code for o in
+                list(self._pending_short_orders.values()) + list(self._pending_cover_orders.values())):
+            return False   # 同一檔不同時做多做空
         if self._n_positions() >= self._max_pos():
             return False
 
@@ -1076,7 +1079,8 @@ class DayTrader:
         if not (self._real_ready() and cfg["real_enable_short"]):
             return False
         if any(o["code"] == code for o in
-               list(self._pending_short_orders.values()) + list(self._pending_cover_orders.values())):
+               list(self._pending_short_orders.values()) + list(self._pending_cover_orders.values())
+               + list(self._pending_buy_orders.values()) + list(self._pending_sell_orders.values())):
             return False
         q = self._live_quote(code)
         live = q["bid"] or q["last"]
@@ -1512,6 +1516,22 @@ class DayTrader:
         except Exception:
             pass
 
+    def _cancel(self, o: dict, order_no: str) -> bool:
+        """送取消並回傳是否確定送出。失敗時告警；呼叫端不得當作已取消（避免重複下單 / 退款後留下真實持倉）。"""
+        if not self._cancel_order_fn:
+            return True
+        try:
+            ok = self._cancel_order_fn(o["code"], order_no)
+        except Exception as e:
+            logger.warning(f"[DayTrader] 取消委託例外 {o['code']} {order_no}: {e}")
+            ok = False
+        if ok is False:
+            self._alert(f"⚠️ <b>取消委託失敗</b> {o['code']} 單號={order_no}\n"
+                        f"原委託可能仍在掛單，系統暫不重下也不退款，下一輪再試取消",
+                        key=f"cancel_fail:{order_no}", cooldown=120)
+            return False
+        return True
+
     def _requeue_real_holding(self, o: dict, shares: int | None = None, cost: float | None = None):
         """賣單沒賣掉：把真實持倉放回 holdings 並標記 force_exit，下一輪立即再賣（需在 _lock 內呼叫）。"""
         if o["code"] in self._state["holdings"]:
@@ -1543,6 +1563,8 @@ class DayTrader:
         buy_done = []
         for order_no, o in list(self._pending_buy_orders.items()):
             filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled == -2:
+                continue      # 查詢失敗：狀態不明，這輪不動作
             if filled > 0:
                 # 以實際成交價建倉；fill_price=0 代表 SDK 未回報，退守委託價
                 price = fill_price if fill_price > 0 else o["price"]
@@ -1559,6 +1581,8 @@ class DayTrader:
                 with self._lock:
                     if refund > 0:
                         self._state["cash"] += refund
+                    # 當日額度以實際成交額計（部分成交時退回未成交部分）
+                    self._state["traded"] = self._state.get("traded", 0.0) - o.get("reserved_traded", cost) + cost
                     self._state["holdings"][o["code"]] = {
                         "shares":         filled,
                         "entry_price":    price,
@@ -1587,8 +1611,8 @@ class DayTrader:
                     pass
                 if filled < o["shares"]:
                     # 部分成交：取消剩餘委託，避免之後成交卻沒被追蹤
-                    if self._cancel_order_fn and not o.get("cancel_sent"):
-                        self._cancel_order_fn(o["code"], order_no)
+                    if not o.get("cancel_sent"):
+                        self._cancel(o, order_no)
                     logger.warning(f"[DayTrader] ⚠️ 買單部分成交 {o['code']} {filled}/{o['shares']}股，已取消剩餘委託")
                     self._alert(f"⚠️ <b>當沖買單部分成交</b> {o['code']}  {filled}/{o['shares']}股\n"
                                 f"剩餘委託已送取消，請確認券商庫存", key=f"buy_partial:{order_no}")
@@ -1610,11 +1634,14 @@ class DayTrader:
                 # 2 分鐘無成交：先送取消，下一輪確認「取消前沒有成交」才退款
                 # （取消與成交可能同時發生；直接退款會留下沒人盯的真實持倉）
                 if not o.get("cancel_sent"):
-                    if self._cancel_order_fn:
-                        self._cancel_order_fn(o["code"], order_no)
+                    if not self._cancel(o, order_no):
+                        continue
                     o["cancel_sent"] = True
                     logger.warning(f"[DayTrader] ⏰ 買單超時，已送取消 {o['code']} {order_no}，下一輪確認")
                     continue
+                again, _ = self._check_filled_fn(o["code"], order_no)
+                if again != 0:
+                    continue   # 取消前已成交 / 被拒 / 查詢失敗 → 下一輪正常路徑處理
                 with self._lock:
                     self._state["cash"] += o["reserved_cash"]
                     self._state["traded"] = self._state.get("traded", 0.0) - o.get("reserved_traded", 0.0)
@@ -1627,6 +1654,8 @@ class DayTrader:
         sell_done = []
         for order_no, o in list(self._pending_sell_orders.items()):
             filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled == -2:
+                continue      # 查詢失敗：狀態不明，這輪不動作
             if filled > 0:
                 price = fill_price if fill_price > 0 else o["price"]
                 if fill_price > 0 and abs(fill_price - o["price"]) > 0.01:
@@ -1642,15 +1671,15 @@ class DayTrader:
                 # 部分成交：成本按比例分攤，剩餘股數放回持倉繼續賣
                 cost_part = o["cost"] * filled / o["shares"] if remaining else o["cost"]
                 pnl  = net - cost_part
+                # 剩餘股數：確定取消原單才放回重賣；取消失敗代表原單還掛著，重賣會多賣
+                requeue = bool(remaining) and (o.get("cancel_sent") or self._cancel(o, order_no))
                 with self._lock:
                     self._state["cash"]      += net
                     self._state["daily_pnl"] += pnl
                     self._log_trade(o["code"], "SELL", filled, price, o["reason"], {}, is_real=True, pnl=pnl, order_no=order_no)
-                    if remaining:
+                    if requeue:
                         self._requeue_real_holding(o, shares=remaining, cost=o["cost"] - cost_part)
                 if remaining:
-                    if self._cancel_order_fn and not o.get("cancel_sent"):
-                        self._cancel_order_fn(o["code"], order_no)
                     logger.warning(f"[DayTrader] ⚠️ 賣單部分成交 {o['code']} {filled}/{o['shares']}股，剩餘 {remaining} 股續賣")
                     self._alert(f"⚠️ <b>當沖賣單部分成交</b> {o['code']}  {filled}/{o['shares']}股\n"
                                 f"剩餘 {remaining} 股已重新排入賣出", key=f"sell_partial:{order_no}")
@@ -1688,8 +1717,8 @@ class DayTrader:
                 # 60 秒未成交：先送取消，下一輪確認「取消前沒有成交」才重下
                 # （若原單其實已成交還重下，會變成多賣一次＝真實放空）
                 if not o.get("cancel_sent"):
-                    if self._cancel_order_fn:
-                        self._cancel_order_fn(o["code"], order_no)
+                    if not self._cancel(o, order_no):
+                        continue
                     o["cancel_sent"] = True
                     logger.warning(f"[DayTrader] ⏰ 賣單超時，已送取消 {o['code']} {order_no}，下一輪確認")
                     continue
@@ -1731,6 +1760,8 @@ class DayTrader:
         done = []
         for order_no, o in list(self._pending_short_orders.items()):
             filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled == -2:
+                continue      # 查詢失敗：狀態不明，這輪不動作
             if filled > 0:
                 price = fill_price if fill_price > 0 else o["price"]
                 value = filled * price
@@ -1762,8 +1793,8 @@ class DayTrader:
                                f"score={(o.get('analysis') or {}).get('score', '')} 先賣成交")
                 except Exception:
                     pass
-                if filled < o["shares"] and self._cancel_order_fn and not o.get("cancel_sent"):
-                    self._cancel_order_fn(o["code"], order_no)
+                if filled < o["shares"] and not o.get("cancel_sent"):
+                    self._cancel(o, order_no)
                     self._alert(f"⚠️ <b>反沖先賣部分成交</b> {o['code']} {filled}/{o['shares']}股\n"
                                 f"剩餘委託已送取消", key=f"short_partial:{order_no}")
                 self._start_fast_monitor()
@@ -1779,9 +1810,12 @@ class DayTrader:
                 done.append(order_no)
             elif time.time() - o["placed_at"] > 120:
                 if not o.get("cancel_sent"):
-                    if self._cancel_order_fn:
-                        self._cancel_order_fn(o["code"], order_no)
+                    if not self._cancel(o, order_no):
+                        continue
                     o["cancel_sent"] = True
+                    continue
+                again, _ = self._check_filled_fn(o["code"], order_no)
+                if again != 0:
                     continue
                 with self._lock:
                     self._state["cash"]  += o["reserved"]
@@ -1795,6 +1829,8 @@ class DayTrader:
         done = []
         for order_no, o in list(self._pending_cover_orders.items()):
             filled, fill_price = self._check_filled_fn(o["code"], order_no)
+            if filled == -2:
+                continue      # 查詢失敗：狀態不明，這輪不動作
             if filled > 0:
                 price = fill_price if fill_price > 0 else o["price"]
                 buy_back = filled * price
@@ -1802,17 +1838,16 @@ class DayTrader:
                 part = filled / o["shares"]
                 pnl  = o["proceeds"] * part - (buy_back + fee)
                 remaining = max(o["shares"] - filled, 0)
+                requeue = bool(remaining) and (o.get("cancel_sent") or self._cancel(o, order_no))
                 with self._lock:
                     self._state["cash"]      += o.get("reserved", 0.0) * part + pnl
                     self._state["daily_pnl"] += pnl
                     self._state.setdefault("short_cooldown", {})[o["code"]] = time.time()
                     self._log_trade(o["code"], "COVER", filled, price, o["reason"], {},
                                     is_real=True, pnl=pnl, order_no=order_no)
-                    if remaining:
+                    if requeue:
                         self._requeue_real_short(o, shares=remaining)
                 if remaining:
-                    if self._cancel_order_fn and not o.get("cancel_sent"):
-                        self._cancel_order_fn(o["code"], order_no)
                     self._alert(f"⚠️ <b>反沖回補部分成交</b> {o['code']} {filled}/{o['shares']}股\n"
                                 f"剩餘 {remaining} 股繼續買回", key=f"cover_partial:{order_no}")
                 try:
@@ -1837,8 +1872,8 @@ class DayTrader:
                 done.append(order_no)
             elif time.time() - o["placed_at"] > _COVER_TIMEOUT:
                 if not o.get("cancel_sent"):
-                    if self._cancel_order_fn:
-                        self._cancel_order_fn(o["code"], order_no)
+                    if not self._cancel(o, order_no):
+                        continue
                     o["cancel_sent"] = True
                     continue
                 again, _ = self._check_filled_fn(o["code"], order_no)

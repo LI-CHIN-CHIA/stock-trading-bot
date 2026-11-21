@@ -224,3 +224,36 @@ def test_accounts_and_state_files_are_separate(tmp_path):
     assert _bare(True)._account() == "real"
     assert _bare(False)._account().startswith("paper-")
     assert _bare(True)._state["shadows"] == {}
+
+
+def test_cancel_failure_blocks_resell_and_refund():
+    """取消失敗 → 不標記已取消、不重下賣單（避免重複賣出）。"""
+    t, orders = _real(Q)
+    t._check_filled_fn = lambda code, no: (0, 0.0)
+    t._cancel_order_fn = lambda code, no: False
+    t._pending_sell_orders["S1"] = {"side": "SELL", "code": "2337", "shares": 1000, "price": 50.0,
+                                    "cost": 49_070, "reason": "停損", "placed_at": 0, "retries": 0,
+                                    "entry_price": 49.0}
+    for _ in range(3):
+        t._confirm_pending_orders()
+    assert orders == [] and "S1" in t._pending_sell_orders
+    assert not t._pending_sell_orders["S1"].get("cancel_sent")
+
+
+def test_query_failure_does_not_refund_buy():
+    t, orders = _real(Q)
+    t._paper_buy("2337", 50.0, {})
+    no = next(iter(t._pending_buy_orders))
+    t._pending_buy_orders[no]["placed_at"] = 0
+    t._pending_buy_orders[no]["cancel_sent"] = True
+    t._check_filled_fn = lambda code, n: (-2, 0.0)          # 富邦查詢失敗
+    cash = t._state["cash"]
+    t._confirm_pending_orders()
+    assert no in t._pending_buy_orders and t._state["cash"] == cash
+
+
+def test_no_long_and_short_on_same_code():
+    t, orders = _real(Q)
+    assert t._paper_short("2337", 50.0, {}) is True
+    assert t._paper_buy("2337", 50.0, {}) is False
+    assert len(orders) == 1

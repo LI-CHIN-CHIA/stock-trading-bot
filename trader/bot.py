@@ -1372,6 +1372,8 @@ class TradingBot:
             filled, fill_price = self._check_filled(code, order_no)
             actual_price = fill_price if fill_price > 0 else o["price"]
 
+            if filled == -2:
+                continue   # 查詢失敗：狀態不明，下次再確認
             if filled == -1:
                 # Order rejected by broker
                 logger.warning(f"❌ 委託被拒 {code} {o['side']} 單號={order_no}，移除掛單")
@@ -1460,41 +1462,48 @@ class TradingBot:
         if to_remove:
             self._save_state()
 
-    def _cancel_order(self, order_no: str, code: str):
+    def _cancel_order(self, order_no: str, code: str) -> bool:
         """
         Cancel a pending order. cancel_order() requires an OrderResult object,
         so we fetch get_order_results and find the matching order first.
         """
         try:
-            orders = self.sdk.stock.get_order_results(self.account)
+            orders = self._call_with_relogin(lambda: self.sdk.stock.get_order_results(self.account))
             if not orders.is_success or not orders.data:
                 logger.warning(f"取消委託: 無法取得委託列表 {code}")
-                return
+                return False
             target = next(
                 (o for o in orders.data if getattr(o, "seq_no", None) == order_no),
                 None,
             )
             if target is None:
                 logger.warning(f"取消委託: 找不到委託 {code} 單號={order_no}")
-                return
+                return False
             result = self.sdk.stock.cancel_order(self.account, target)
             if result.is_success:
                 logger.info(f"🗑️  取消委託: {code} 單號={order_no}")
-            else:
-                logger.warning(f"取消委託失敗: {code} {result.message}")
+                return True
+            # 已全部成交 / 已取消的委託無法再取消：交給成交查詢判斷，這裡視為「不用再取消」
+            msg = result.message or ""
+            logger.warning(f"取消委託失敗: {code} {msg}")
+            return any(k in msg for k in ("已成交", "已取消", "已刪單", "刪單成功"))
         except Exception as e:
             logger.warning(f"取消委託錯誤: {e}")
+            return False
 
     def _check_filled(self, code: str, order_no: str | None) -> tuple[int, float]:
         """
         Query get_order_results and return (filled_qty, filled_price).
         filled_qty = 0  → still pending
         filled_qty = -1 → rejected
+        filled_qty = -2 → 查詢失敗（狀態不明，呼叫端不可當成「未成交」）
         filled_qty > 0  → filled at filled_price (actual match price, NOT limit price)
         """
         try:
             result = self._call_with_relogin(lambda: self.sdk.stock.get_order_results(self.account))
-            if not result.is_success or not result.data:
+            if not result.is_success:
+                return (-2, 0.0)
+            if not result.data:
                 return (0, 0.0)
             for o in result.data:
                 o_no     = getattr(o, "seq_no", None)
@@ -1516,6 +1525,7 @@ class TradingBot:
                     return (o_qty, o_price)
         except Exception as e:
             logger.warning(f"成交確認查詢失敗: {e}")
+            return (-2, 0.0)
         return (0, 0.0)
 
     def _sync_holdings_from_fubon(self):

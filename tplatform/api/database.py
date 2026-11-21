@@ -36,6 +36,11 @@ async def init_db():
             await conn.execute(text(
                 f"ALTER TABLE platform_configs ADD COLUMN IF NOT EXISTS {col} boolean NOT NULL DEFAULT false"))
         await conn.execute(text(
+            "ALTER TABLE platform_configs ADD COLUMN IF NOT EXISTS paper_budgets varchar(200) NOT NULL DEFAULT '500000'"))
+        for tbl in ("platform_trades", "platform_positions"):
+            await conn.execute(text(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS account varchar(24) NOT NULL DEFAULT ''"))
+        await conn.execute(text(
             "CREATE TABLE IF NOT EXISTS platform_bot_status ("
             " user_id integer PRIMARY KEY, data text NOT NULL,"
             " updated_at timestamptz NOT NULL DEFAULT now())"))
