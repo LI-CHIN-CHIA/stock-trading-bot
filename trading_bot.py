@@ -77,6 +77,8 @@ from trader.dip_trader import DipTrader
 from trader.swing_trader import SwingTrader
 dip_bot       = DipTrader()
 swing_bot     = SwingTrader()
+from trader.trend_trader import TrendTrader
+trend_bot     = TrendTrader()   # 順勢當沖（紙上，富邦即時報價）
 overnight_bot = OvernightTrader()
 
 
@@ -144,6 +146,16 @@ def job_day_trader():
         swing_bot.run_cycle()
     except Exception as e:
         logger.error(f"回檔波段週期失敗: {e}", exc_info=True)
+
+
+def job_trend_trader():
+    """順勢當沖（紙上）：獨立排程，避免被其他策略的 yfinance 下載拖慢 09:30 進場。"""
+    if not is_trading_day():
+        return
+    try:
+        trend_bot.run_cycle()
+    except Exception as e:
+        logger.error(f"順勢當沖週期失敗: {e}", exc_info=True)
 
 
 def job_overnight_trader():
@@ -539,6 +551,7 @@ def main():
                     quote_fn          = bot.live_quote,
                     candles_fn        = bot.live_candles,
                 )
+                trend_bot.set_quote_fn(bot.live_quote)
         else:
             logger.error("❌ 富邦登入失敗，真實當沖不會下單")
     from utils.bot_status import report_status
@@ -559,6 +572,13 @@ def main():
             timezone=TZ,
         ),
         id="day_trader", name="當沖盯盤",
+        max_instances=1, coalesce=True, misfire_grace_time=30,
+    )
+
+    scheduler.add_job(
+        job_trend_trader,
+        CronTrigger(minute="*", hour="9,13", day_of_week="mon-fri", timezone=TZ),
+        id="trend_trader", name="順勢當沖(紙)",
         max_instances=1, coalesce=True, misfire_grace_time=30,
     )
 

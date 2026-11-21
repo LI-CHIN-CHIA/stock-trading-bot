@@ -152,7 +152,7 @@ func accountLabel(_ id: String?, isReal: Bool) -> String {
     // "<策略>-<額度>"：paper = 一般模擬，fade = 過熱放空策略
     let parts = id.split(separator: "-")
     if parts.count == 2, let cap = Double(parts[1]) {
-        let name = ["paper": "模擬", "fade": "過熱放空", "dip": "超跌做多", "swing": "回檔波段"][String(parts[0])] ?? String(parts[0])
+        let name = ["paper": "模擬", "fade": "過熱放空", "dip": "超跌做多", "swing": "回檔波段", "trend": "順勢當沖"][String(parts[0])] ?? String(parts[0])
         let wan = cap / 10000
         return wan == wan.rounded() ? "\(name) \(Int(wan))萬" : "\(name) \(String(format: "%.1f", wan))萬"
     }
